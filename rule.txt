@@ -1,0 +1,147 @@
+Triển khai từ cơ bản nhất để hiểu logic, không nhảy bước.
+
+GIAI ĐOẠN 1 — NỀN TẢNG (hiểu pipeline)
+
+    Mục tiêu: thấy được camera + 3D object chồng lên nhau.
+
+    Camera
+
+    Get webcam.
+
+    Hiển thị full screen.
+
+    Chưa AR, chưa AI.
+
+    Three.js overlay
+
+    Render 1 object đơn giản (cube / torus).
+
+    Đặt cố định giữa màn hình.
+
+    Hiểu camera, scene, light.
+
+    → Nếu bước này chưa hiểu, dừng.
+
+GIAI ĐOẠN 2 — HAND TRACKING
+
+    Mục tiêu: 3D object bám theo tay.
+
+    MediaPipe Hands
+
+    Detect 1 tay.
+
+    Log keypoints.
+
+    Hiểu normalized coordinates [0–1].
+
+    Mapping tọa độ
+
+    Map keypoint → world space.
+
+    Object di chuyển theo tay.
+
+    Chưa cần đẹp.
+
+    → Hiểu “từ pixel → world”.
+
+GIAI ĐOẠN 3 — TRY-ON TỐI THIỂU
+
+    Mục tiêu: đúng logic sản phẩm.
+
+    Anchor đúng
+
+    Nhẫn → index MCP.
+
+    Vòng → wrist.
+
+    Không quan tâm UI.
+
+    Smoothing
+
+    Chống rung.
+
+    Kalman / EMA.
+
+    → Lúc này đã là AR thật, dù xấu.
+
+GIAI ĐOẠN 4 — TƯƠNG TÁC
+
+    Mục tiêu: điều khiển không chạm.
+
+    Gesture cơ bản
+
+    Swipe trái / phải.
+
+    Hold 1s.
+
+    FSM
+
+    Idle → Active → Browse → Try-on → Reset.
+
+    Không logic chồng chéo.
+
+    → Đây là xương sống dự án.
+
+GIAI ĐOẠN 5 — TÀI SẢN 3D
+
+    Mục tiêu: đồ nhìn được.
+
+    GLB chuẩn
+
+    Pivot đúng.
+
+    Scale chuẩn.
+
+    PBR material.
+
+    Ánh sáng
+
+    HDRI hoặc directional + ambient.
+
+    Không shadow động.
+
+GIAI ĐOẠN 6 — UX KIOSK
+
+    Mục tiêu: khách dùng được.
+
+    Carousel item
+
+    Ít item.
+
+    Feedback rõ.
+
+    Timeout / reset
+
+    Không ai → reset.
+
+GIAI ĐOẠN 7 — PRODUCTION
+
+    Mục tiêu: chạy showroom.
+
+    Performance
+
+    30–60 FPS ổn định.
+
+    Không leak memory.
+
+    Hardware
+
+    Camera cố định.
+
+    Ánh sáng ổn định.
+
+TƯ DUY QUAN TRỌNG
+
+    Tách tracking / render / UI / state.
+
+    Làm xấu nhưng đúng trước, đẹp sau.
+
+    Không tối ưu sớm.
+
+    Không thêm feature khi logic chưa vững.
+
+TÓM TẮT 1 DÒNG
+
+    Camera → tracking → mapping → render → gesture → state → UX.
+
+Hiểu được chuỗi này là hiểu toàn bộ bài toán.
