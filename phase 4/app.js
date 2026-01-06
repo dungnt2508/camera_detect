@@ -753,9 +753,12 @@ function init() {
   directionalLight2.position.set(-5, 3, -5);
   scene.add(directionalLight2);
 
+  // Danh sách items từ assets
   const items = [
-    { name: "Nhẫn", type: "ring", glbPath: "assets/1.glb" },
-    { name: "Vòng", type: "bracelet", glbPath: "assets/ball_bearing.glb" }
+    { name: "Nhẫn Format2", type: "ring", glbPath: "assets/ring/Format2.glb" },
+    // { name: "Nhẫn Main", type: "ring", glbPath: "assets/ring/Main_model.glb" },
+    { name: "Vòng 1", type: "bracelet", glbPath: "assets/bracelet/1.glb" },
+    { name: "Vòng Ball Bearing", type: "bracelet", glbPath: "assets/bracelet/ball_bearing.glb" }
   ];
 
   let currentItemIndex = 0;
@@ -769,15 +772,20 @@ function init() {
   const AUTO_ZOOM_SPEED = 0.005; // Tốc độ zoom mỗi frame
 
   // GLB models containers
-  let bracelet = null;
-  let ring = null;
   const loader = new GLTFLoader();
+  const loadedModels = []; // Mảng chứa tất cả models đã load
+  let currentModel = null; // Model hiện tại đang try-on
   
-  // Target scale cho models (chuẩn hóa kích thước)
-  const TARGET_RING_SIZE = 0.15; // Kích thước mục tiêu cho nhẫn
-  const TARGET_BRACELET_SIZE = 0.6; // Kích thước mục tiêu cho vòng
+  // Carousel settings
+  const CAROUSEL_CENTER_Z = -2; // Vị trí Z của item chính
+  const CAROUSEL_BOTTOM_Y = -1.5; // Vị trí Y của items phụ (phía dưới)
+  const CAROUSEL_BOTTOM_Z = -1.5; // Vị trí Z của items phụ
+  const CAROUSEL_ITEM_SPACING = 0.4; // Khoảng cách giữa các items phụ
+  const CAROUSEL_CENTER_SCALE = 1.0; // Scale của item chính giữa
+  const CAROUSEL_SIDE_SCALE = 0.3; // Scale của items phụ (nhỏ hơn)
   
-  function loadModels() {
+  // Target scale chung cho tất cả models (chuẩn hóa kích thước đồng đều)
+  const TARGET_UNIFORM_SIZE = 0.3; // Kích thước mục tiêu chung cho tất cả items
   
   function calculateBoundingBox(object) {
     const box = new THREE.Box3().setFromObject(object);
@@ -804,7 +812,7 @@ function init() {
     loader.load(
       path,
       (gltf) => {
-        const model = gltf.scene;
+        const model = gltf.scene.clone(); // Clone để có thể dùng nhiều instance
         // Traverse và đảm bảo PBR materials được giữ nguyên
         model.traverse((child) => {
           if (child.isMesh) {
@@ -824,74 +832,128 @@ function init() {
     );
   }
   
-    // Load ring model
-    loadGLBModel('assets/1.glb', (model) => {
-      ring = normalizeModelScale(model, TARGET_RING_SIZE);
-      ring.visible = false;
-      scene.add(ring);
-      console.log('Ring model loaded');
-      updateCurrentItem(); // Update sau khi load
-    });
+  function loadAllModels() {
+    let loadedCount = 0;
     
-    // Load bracelet model
-    loadGLBModel('assets/ball_bearing.glb', (model) => {
-      bracelet = normalizeModelScale(model, TARGET_BRACELET_SIZE);
-      bracelet.visible = false;
-      scene.add(bracelet);
-      console.log('Bracelet model loaded');
-      updateCurrentItem(); // Update sau khi load
+    items.forEach((item, index) => {
+      // Sử dụng target size chung cho tất cả items
+      loadGLBModel(item.glbPath, (model) => {
+        const normalizedModel = normalizeModelScale(model, TARGET_UNIFORM_SIZE);
+        normalizedModel.visible = false;
+        scene.add(normalizedModel);
+        
+        loadedModels[index] = {
+          model: normalizedModel,
+          item: item
+        };
+        
+        loadedCount++;
+        console.log(`Loaded ${item.name} (${loadedCount}/${items.length}) - Size normalized to ${TARGET_UNIFORM_SIZE}`);
+        
+        if (loadedCount === items.length) {
+          console.log('All models loaded with uniform size!');
+          updateCarousel();
+        }
+      });
     });
   }
   
-  // Khởi tạo GLB loader
-  loadModels();
-
-  function updateCurrentItem() {
-    const item = items[currentItemIndex];
-    if (!ring || !bracelet) {
-      // Models chưa load xong
-      return;
+  function updateCarousel() {
+    // Ẩn tất cả models
+    loadedModels.forEach((loadedItem) => {
+      if (loadedItem && loadedItem.model) {
+        loadedItem.model.visible = false;
+      }
+    });
+    
+    // Hiển thị item chính ở giữa màn hình
+    const mainItem = loadedModels[currentItemIndex];
+    if (mainItem && mainItem.model) {
+      const mainModel = mainItem.model;
+      mainModel.position.set(0, 0, CAROUSEL_CENTER_Z);
+      mainModel.scale.setScalar(CAROUSEL_CENTER_SCALE);
+      mainModel.visible = true;
+      mainModel.rotation.y = 0;
+      mainModel.rotation.z = 0;
     }
     
-    if (item.type === "bracelet") {
-      bracelet.visible = true;
-      ring.visible = false;
-      bracelet.scale.set(itemScale, itemScale, itemScale);
-    } else {
-      ring.visible = true;
-      bracelet.visible = false;
-      ring.scale.set(itemScale, itemScale, itemScale);
-    }
+    // Hiển thị các items phụ ở phía dưới màn hình
+    let sideItemIndex = 0;
+    loadedModels.forEach((loadedItem, index) => {
+      if (!loadedItem || !loadedItem.model) return;
+      
+      // Bỏ qua item chính
+      if (index === currentItemIndex) return;
+      
+      const model = loadedItem.model;
+      
+      // Tính vị trí X để căn giữa các items phụ
+      const totalSideItems = loadedModels.length - 1;
+      const startX = -(totalSideItems - 1) * CAROUSEL_ITEM_SPACING / 2;
+      
+      // Vị trí items phụ ở phía dưới
+      model.position.x = startX + sideItemIndex * CAROUSEL_ITEM_SPACING;
+      model.position.y = CAROUSEL_BOTTOM_Y;
+      model.position.z = CAROUSEL_BOTTOM_Z;
+      
+      // Scale nhỏ hơn
+      model.scale.setScalar(CAROUSEL_SIDE_SCALE);
+      model.visible = true;
+      
+      // Rotation
+      model.rotation.y = 0;
+      model.rotation.z = 0;
+      
+      sideItemIndex++;
+    });
+  }
+  
+  // Khởi tạo load tất cả models
+  loadAllModels();
+
+  function updateCurrentItem() {
+    // Chỉ update carousel, không update try-on model
+    updateCarousel();
+  }
+  
+  function getCurrentModel() {
+    const loadedItem = loadedModels[currentItemIndex];
+    return loadedItem ? loadedItem.model : null;
   }
   
   function resetZoom() {
     itemScale = 1.0;
     autoZoomState = 'STOPPED';
-    if (bracelet) bracelet.scale.set(1, 1, 1);
-    if (ring) ring.scale.set(1, 1, 1);
+    if (currentModel) {
+      currentModel.scale.setScalar(1.0);
+    }
   }
   
   function zoomIn() {
     itemScale = Math.min(MAX_SCALE, itemScale + SCALE_STEP);
-    if (bracelet) bracelet.scale.set(itemScale, itemScale, itemScale);
-    if (ring) ring.scale.set(itemScale, itemScale, itemScale);
+    if (currentModel) {
+      currentModel.scale.setScalar(itemScale);
+    }
   }
   
   function zoomOut() {
     itemScale = Math.max(MIN_SCALE, itemScale - SCALE_STEP);
-    if (bracelet) bracelet.scale.set(itemScale, itemScale, itemScale);
-    if (ring) ring.scale.set(itemScale, itemScale, itemScale);
+    if (currentModel) {
+      currentModel.scale.setScalar(itemScale);
+    }
   }
   
   function updateAutoZoom() {
     if (autoZoomState === 'ZOOM_IN') {
       itemScale = Math.min(MAX_SCALE, itemScale + AUTO_ZOOM_SPEED);
-      if (bracelet) bracelet.scale.set(itemScale, itemScale, itemScale);
-      if (ring) ring.scale.set(itemScale, itemScale, itemScale);
+      if (currentModel) {
+        currentModel.scale.setScalar(itemScale);
+      }
     } else if (autoZoomState === 'ZOOM_OUT') {
       itemScale = Math.max(MIN_SCALE, itemScale - AUTO_ZOOM_SPEED);
-      if (bracelet) bracelet.scale.set(itemScale, itemScale, itemScale);
-      if (ring) ring.scale.set(itemScale, itemScale, itemScale);
+      if (currentModel) {
+        currentModel.scale.setScalar(itemScale);
+      }
     }
   }
   
@@ -921,6 +983,9 @@ function init() {
 
   const gestureDetector = new GestureDetector();
   const appStateMachine = new ApplicationStateMachine();
+  
+  // Track current app state for animate function
+  let currentAppState = 'IDLE';
 
   const SMOOTHING_ALPHA = 0.3;
   let smoothedLandmarks = null;
@@ -961,7 +1026,7 @@ function init() {
 
   hands.onResults((results) => {
     const hasHand = results.multiHandLandmarks && results.multiHandLandmarks.length > 0;
-    const currentAppState = appStateMachine.update(hasHand);
+    currentAppState = appStateMachine.update(hasHand);
     
     if (hasHand) {
       const rawLandmarks = results.multiHandLandmarks[0];
@@ -979,19 +1044,61 @@ function init() {
       const smoothedWrist = smoothedLandmarks[0];
       const smoothedIndexMCP = smoothedLandmarks[5];
       
-      // Chỉ hiển thị item khi ở BROWSE hoặc TRY_ON
-      if (currentAppState === 'BROWSE' || currentAppState === 'TRY_ON') {
-        if (bracelet) updateBraceletPosition(smoothedWrist, bracelet);
-        if (ring) updateRingPosition(smoothedIndexMCP, ring);
-      } else {
-        if (bracelet) bracelet.visible = false;
-        if (ring) ring.visible = false;
+      // BROWSE: Hiển thị carousel, không hiển thị item trên tay
+      if (currentAppState === 'BROWSE') {
+        updateCarousel();
+        if (currentModel) {
+          currentModel.visible = false;
+          currentModel = null;
+        }
+      }
+      // TRY_ON: Ẩn carousel, hiển thị item trên tay
+      else if (currentAppState === 'TRY_ON') {
+        // Ẩn carousel
+        loadedModels.forEach((loadedItem) => {
+          if (loadedItem && loadedItem.model) {
+            loadedItem.model.visible = false;
+          }
+        });
+        
+        // Tạo/clone model cho try-on nếu chưa có
+        if (!currentModel) {
+          const loadedItem = loadedModels[currentItemIndex];
+          if (loadedItem && loadedItem.model) {
+            currentModel = loadedItem.model.clone();
+            currentModel.visible = true;
+            scene.add(currentModel);
+            resetZoom();
+          }
+        }
+        
+        // Cập nhật vị trí item trên tay
+        if (currentModel) {
+          const item = items[currentItemIndex];
+          if (item.type === "bracelet") {
+            updateBraceletPosition(smoothedWrist, currentModel);
+          } else {
+            updateRingPosition(smoothedIndexMCP, currentModel);
+          }
+        }
+      }
+      // ACTIVE, IDLE, RESET: Ẩn tất cả
+      else {
+        updateCarousel();
+        if (currentModel) {
+          currentModel.visible = false;
+          currentModel = null;
+        }
       }
       
       // Track FIST state change để xử lý release trong TRY_ON
       const currentFistState = gestureDetector.fistHoldDetector.getState();
       if (currentAppState === 'TRY_ON' && lastFistState === 'COMMITTED' && currentFistState === 'OPEN') {
         // FIST released → quay về BROWSE và reset zoom
+        if (currentModel) {
+          scene.remove(currentModel);
+          currentModel = null;
+        }
         resetZoom();
         appStateMachine.transitionTo('BROWSE');
       }
@@ -1040,8 +1147,12 @@ function init() {
       }
       gestureDetector.reset();
       smoothedLandmarks = null;
-      if (bracelet) bracelet.visible = false;
-      if (ring) ring.visible = false;
+      // Ẩn carousel và try-on model
+      updateCarousel();
+      if (currentModel) {
+        currentModel.visible = false;
+        currentModel = null;
+      }
       lastFistState = 'OPEN';
     }
   });
@@ -1065,16 +1176,21 @@ function init() {
         break;
 
       case 'BROWSE':
-        // BROWSE: Chỉ xử lý swipe để đổi item
+        // BROWSE: Chỉ xử lý swipe để đổi item trong carousel
         if (gesture === GESTURES.MOVE_LEFT) {
           currentItemIndex = (currentItemIndex - 1 + items.length) % items.length;
-          updateCurrentItem();
+          updateCurrentItem(); // Update carousel
         } else if (gesture === GESTURES.MOVE_RIGHT) {
           currentItemIndex = (currentItemIndex + 1) % items.length;
-          updateCurrentItem();
+          updateCurrentItem(); // Update carousel
         }
         // BROWSE → TRY_ON: Nắm tay (FIST) hold 1s
         else if (gesture === GESTURES.FIST_HOLD) {
+          // Xóa currentModel cũ nếu có
+          if (currentModel) {
+            scene.remove(currentModel);
+            currentModel = null;
+          }
           resetZoom(); // Reset zoom khi vào TRY_ON
           appStateMachine.transitionTo('TRY_ON');
         }
@@ -1192,8 +1308,23 @@ function init() {
 
   function animate() {
     requestAnimationFrame(animate);
-    if (bracelet) bracelet.rotation.z += 0.005;
-    if (ring) ring.rotation.z += 0.005;
+    
+    // Chỉ rotate item chính ở giữa màn hình (không rotate items phụ)
+    if (currentAppState === 'BROWSE') {
+      const mainItem = loadedModels[currentItemIndex];
+      if (mainItem && mainItem.model && mainItem.model.visible) {
+        // Chỉ rotate item chính (y=0, z=CAROUSEL_CENTER_Z)
+        if (mainItem.model.position.y === 0 && mainItem.model.position.z === CAROUSEL_CENTER_Z) {
+          mainItem.model.rotation.z += 0.005;
+        }
+      }
+    }
+    
+    // Rotate try-on model
+    if (currentModel && currentModel.visible) {
+      currentModel.rotation.z += 0.005;
+    }
+    
     // Auto zoom update
     updateAutoZoom();
     renderer.render(scene, camera);
