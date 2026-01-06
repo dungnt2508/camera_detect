@@ -6,78 +6,62 @@ window.addEventListener("load", () => {
 // ========== GESTURE TYPES ==========
 const GESTURES = {
   NONE: 'NONE',
-  FIST: 'FIST',           // Nắm tay
-  MOVE_LEFT: 'MOVE_LEFT', // Di chuyển qua trái
-  MOVE_RIGHT: 'MOVE_RIGHT', // Di chuyển qua phải
-  THUMB_UP: 'THUMB_UP',   // Giơ ngón cái
-  MIDDLE_UP: 'MIDDLE_UP', // Giơ ngón giữa
-  INDEX_UP: 'INDEX_UP',   // Giơ ngón trỏ
-  RING_UP: 'RING_UP',     // Giơ ngón áp út
-  PINKY_UP: 'PINKY_UP'    // Giơ ngón út
+  FIST: 'FIST',
+  INDEX_UP: 'INDEX_UP',
+  MIDDLE_UP: 'MIDDLE_UP',
+  RING_UP: 'RING_UP',
+  PINKY_UP: 'PINKY_UP',
+  THUMB_UP: 'THUMB_UP',
+  PINCH: 'PINCH',
+  MOVE_LEFT: 'MOVE_LEFT',
+  MOVE_RIGHT: 'MOVE_RIGHT'
 };
 
-// ========== GESTURE DETECTOR ==========
-class GestureDetector {
+// ========== STATIC GESTURE DETECTOR ==========
+class StaticGestureDetector {
   constructor() {
-    // Lịch sử vị trí để detect di chuyển
-    this.positionHistory = [];
-    this.positionHistoryMaxLength = 10;
-    this.moveThreshold = 0.1; // Ngưỡng để detect di chuyển (normalized)
-    
-    // Keypoints của MediaPipe Hands (21 điểm)
-    // 0: WRIST
-    // 1-4: THUMB
-    // 5-8: INDEX
-    // 9-12: MIDDLE
-    // 13-16: RING
-    // 17-20: PINKY
+    this.fingerAngleThreshold = 150; // độ
+    this.staticMinFrames = 3;
+    this.gestureHistory = [];
   }
 
-  // Tính khoảng cách giữa 2 điểm
+  angle(a, b, c) {
+    const ab = { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z };
+    const cb = { x: c.x - b.x, y: c.y - b.y, z: c.z - b.z };
+    const dot = ab.x * cb.x + ab.y * cb.y + ab.z * cb.z;
+    const magAB = Math.hypot(ab.x, ab.y, ab.z);
+    const magCB = Math.hypot(cb.x, cb.y, cb.z);
+    if (magAB === 0 || magCB === 0) return 0;
+    return Math.acos(Math.max(-1, Math.min(1, dot / (magAB * magCB)))) * 180 / Math.PI;
+  }
+
   distance(p1, p2) {
-    return Math.sqrt(
-      Math.pow(p1.x - p2.x, 2) +
-      Math.pow(p1.y - p2.y, 2) +
-      Math.pow(p1.z - p2.z, 2)
-    );
+    return Math.hypot(p1.x - p2.x, p1.y - p2.y, p1.z - p2.z);
   }
 
-  // Kiểm tra ngón tay có duỗi ra không
   isFingerExtended(landmarks, fingerIndices) {
-    // fingerIndices: [MCP, PIP, DIP, TIP]
-    const [mcp, pip, dip, tip] = fingerIndices;
-    
-    // Kiểm tra: TIP phải cao hơn PIP, và PIP phải cao hơn MCP
-    // (trong normalized coordinates, y nhỏ hơn = cao hơn)
-    const tipY = landmarks[tip].y;
-    const pipY = landmarks[pip].y;
-    const mcpY = landmarks[mcp].y;
-    
-    return tipY < pipY && pipY < mcpY;
+    const [mcpIdx, pipIdx, dipIdx, tipIdx] = fingerIndices;
+    const mcp = landmarks[mcpIdx];
+    const pip = landmarks[pipIdx];
+    const dip = landmarks[dipIdx];
+    const tip = landmarks[tipIdx];
+    const anglePIP = this.angle(mcp, pip, dip);
+    const angleDIP = this.angle(pip, dip, tip);
+    return anglePIP > this.fingerAngleThreshold && angleDIP > this.fingerAngleThreshold;
   }
 
-  // Detect gesture từ landmarks
-  detect(landmarks) {
+  isThumbExtended(landmarks, handScale) {
+    const thumbTip = landmarks[4];
+    const indexMCP = landmarks[5];
+    return this.distance(thumbTip, indexMCP) > handScale * 0.6;
+  }
+
+  detect(landmarks, handScale) {
     if (!landmarks || landmarks.length < 21) {
-      return GESTURES.NONE;
+      return { gesture: GESTURES.NONE, confidence: 0 };
     }
 
-    const wrist = landmarks[0];
-    
-    // Cập nhật position history
-    this.positionHistory.push({
-      x: wrist.x,
-      y: wrist.y,
-      timestamp: Date.now()
-    });
-    
-    if (this.positionHistory.length > this.positionHistoryMaxLength) {
-      this.positionHistory.shift();
-    }
-
-    // 1. Detect nắm tay (FIST)
-    // Tất cả các ngón đều gập (không duỗi)
-    const thumbExtended = this.isFingerExtended(landmarks, [1, 2, 3, 4]);
+    const thumbExtended = this.isThumbExtended(landmarks, handScale);
     const indexExtended = this.isFingerExtended(landmarks, [5, 6, 7, 8]);
     const middleExtended = this.isFingerExtended(landmarks, [9, 10, 11, 12]);
     const ringExtended = this.isFingerExtended(landmarks, [13, 14, 15, 16]);
@@ -91,53 +75,372 @@ class GestureDetector {
       pinkyExtended
     ].filter(Boolean).length;
     
-    // Nếu không có ngón nào duỗi → nắm tay
+    let gesture = GESTURES.NONE;
     if (extendedFingers === 0) {
-      return GESTURES.FIST;
+      gesture = GESTURES.FIST;
+    } else if (extendedFingers === 1) {
+      if (thumbExtended) gesture = GESTURES.THUMB_UP;
+      else if (indexExtended) gesture = GESTURES.INDEX_UP;
+      else if (middleExtended) gesture = GESTURES.MIDDLE_UP;
+      else if (ringExtended) gesture = GESTURES.RING_UP;
+      else if (pinkyExtended) gesture = GESTURES.PINKY_UP;
     }
-
-    // 2. Detect giơ từng ngón (chỉ 1 ngón duỗi)
-    if (extendedFingers === 1) {
-      if (thumbExtended) return GESTURES.THUMB_UP;
-      if (indexExtended) return GESTURES.INDEX_UP;
-      if (middleExtended) return GESTURES.MIDDLE_UP;
-      if (ringExtended) return GESTURES.RING_UP;
-      if (pinkyExtended) return GESTURES.PINKY_UP;
+    
+    // Update history
+    if (gesture === GESTURES.NONE) {
+      this.gestureHistory = [];
+      return { gesture: GESTURES.NONE, confidence: 0 };
     }
-
-    // 3. Detect di chuyển trái/phải (khi có nhiều ngón duỗi hoặc nắm tay)
-    if (this.positionHistory.length >= 5) {
-      const recent = this.positionHistory.slice(-5);
-      const first = recent[0];
-      const last = recent[recent.length - 1];
-      
-      const deltaX = last.x - first.x;
-      const absDeltaX = Math.abs(deltaX);
-      const deltaTime = last.timestamp - first.timestamp;
-      
-      // Phải di chuyển đủ xa và đủ nhanh
-      if (absDeltaX > this.moveThreshold && deltaTime < 500) {
-        // Kiểm tra direction consistency
-        let consistent = true;
-        for (let i = 1; i < recent.length - 1; i++) {
-          const dir = recent[i].x - first.x;
-          if ((dir > 0) !== (deltaX > 0)) {
-            consistent = false;
-            break;
-          }
-        }
-        
-        if (consistent) {
-          return deltaX > 0 ? GESTURES.MOVE_RIGHT : GESTURES.MOVE_LEFT;
-        }
-      }
+    
+    const last = this.gestureHistory.at(-1);
+    if (last && last !== gesture) {
+      this.gestureHistory = [];
     }
-
-    return GESTURES.NONE;
+    this.gestureHistory.push(gesture);
+    if (this.gestureHistory.length > this.staticMinFrames) {
+      this.gestureHistory.shift();
+    }
+    
+    // Chỉ return nếu ổn định đủ frame
+    if (this.gestureHistory.length >= this.staticMinFrames) {
+      const allSame = this.gestureHistory.every(g => g === gesture);
+      const confidence = allSame ? 0.85 : 0.5;
+      return { gesture, confidence };
+    }
+    
+    return { gesture: GESTURES.NONE, confidence: 0 };
   }
 
   reset() {
-    this.positionHistory = [];
+    this.gestureHistory = [];
+  }
+}
+
+// ========== PINCH DETECTOR ==========
+class PinchDetector {
+  constructor() {
+    this.state = 'OPEN';
+    this.startFrames = 0;
+    this.holdStartTime = 0;
+    this.holdDuration = 150;
+    this.startThreshold = 0.25;
+    this.endThreshold = 0.35;
+  }
+
+  distance(p1, p2) {
+    return Math.hypot(p1.x - p2.x, p1.y - p2.y, p1.z - p2.z);
+  }
+
+  detect(landmarks, handScale) {
+    if (!landmarks || landmarks.length < 21) {
+      return { gesture: GESTURES.NONE, confidence: 0 };
+    }
+
+    const thumbTip = landmarks[4];
+    const indexTip = landmarks[8];
+    const dist = this.distance(thumbTip, indexTip);
+    const normalizedDist = dist / Math.max(0.1, handScale);
+    const now = Date.now();
+    
+    switch (this.state) {
+      case 'OPEN':
+        if (normalizedDist < this.startThreshold) {
+          this.startFrames++;
+          if (this.startFrames >= 3) {
+            this.state = 'PINCH_START';
+            this.startFrames = 0;
+          }
+        } else {
+          this.startFrames = 0;
+        }
+        break;
+        
+      case 'PINCH_START':
+        if (normalizedDist < this.startThreshold) {
+          this.state = 'PINCH_HOLD';
+          this.holdStartTime = now;
+        } else {
+          this.state = 'OPEN';
+        }
+        break;
+        
+      case 'PINCH_HOLD':
+        if (normalizedDist > this.endThreshold) {
+          this.state = 'RELEASE';
+        } else {
+          const holdTime = now - this.holdStartTime;
+          if (holdTime >= this.holdDuration) {
+            return { gesture: GESTURES.PINCH, confidence: 0.8 };
+          }
+        }
+        break;
+        
+      case 'RELEASE':
+        this.state = 'OPEN';
+        break;
+    }
+    
+    return { gesture: GESTURES.NONE, confidence: 0 };
+  }
+
+  reset() {
+    this.state = 'OPEN';
+    this.startFrames = 0;
+  }
+}
+
+// ========== MOVE STATE MACHINE ==========
+class MoveStateMachine {
+  constructor() {
+    // Parameters
+    this.minVelocity = 0.06; // KHÔNG normalize
+    this.minDisplacement = 0.08; // Sẽ normalize theo handScale
+    this.commitVelocity = 0.02; // KHÔNG normalize
+    this.velocityRatio = 1.5; // |vx| > ratio * |vy|
+    this.directionChangeThreshold = 0.1; // Velocity để coi là đổi hướng
+    
+    // State
+    this.state = 'IDLE'; // IDLE, MOVING, COMMIT, COOLDOWN
+    this.direction = null; // 'LEFT' hoặc 'RIGHT'
+    this.cooldownDuration = 1000; // ms
+    this.cooldownStartTime = 0;
+    
+    // Tracking (KHÔNG dùng EMA - dùng raw landmarks)
+    this.rawPalmHistory = []; // Raw palm positions (không smooth)
+    this.totalDisplacement = 0; // Tích lũy |vx|
+    this.windowSize = 20;
+    this.frameCount = 0;
+  }
+
+  computePalmCenter(landmarks) {
+    const wrist = landmarks[0];
+    const indexMCP = landmarks[5];
+    const middleMCP = landmarks[9];
+    const ringMCP = landmarks[13];
+    const pinkyMCP = landmarks[17];
+    return {
+      x: (wrist.x + indexMCP.x + middleMCP.x + ringMCP.x + pinkyMCP.x) / 5,
+      y: (wrist.y + indexMCP.y + middleMCP.y + ringMCP.y + pinkyMCP.y) / 5,
+      z: (wrist.z + indexMCP.z + middleMCP.z + ringMCP.z + pinkyMCP.z) / 5
+    };
+  }
+
+  update(landmarks, handScale, handedness) {
+    // Dùng RAW landmarks (không EMA) cho swipe detection
+    const palm = this.computePalmCenter(landmarks);
+    this.frameCount++;
+    
+    // Cập nhật raw palm history
+    this.rawPalmHistory.push({ x: palm.x, y: palm.y, frame: this.frameCount });
+    if (this.rawPalmHistory.length > this.windowSize) {
+      this.rawPalmHistory.shift();
+    }
+    
+    if (this.rawPalmHistory.length < 3) {
+      return { gesture: GESTURES.NONE, confidence: 0 };
+    }
+    
+    // Tính velocity (frame-based)
+    const velocities = [];
+    for (let i = 1; i < this.rawPalmHistory.length; i++) {
+      const prev = this.rawPalmHistory[i - 1];
+      const curr = this.rawPalmHistory[i];
+      velocities.push({ vx: curr.x - prev.x, vy: curr.y - prev.y });
+    }
+    
+    const recentVelocities = velocities.slice(-5);
+    const meanVx = recentVelocities.reduce((sum, v) => sum + v.vx, 0) / recentVelocities.length;
+    const meanVy = recentVelocities.reduce((sum, v) => sum + v.vy, 0) / recentVelocities.length;
+    const absMeanVx = Math.abs(meanVx);
+    const absMeanVy = Math.abs(meanVy);
+    const instantVx = velocities[velocities.length - 1].vx;
+    const instantAbsVx = Math.abs(instantVx);
+    
+    // Normalize displacement theo handScale
+    const normalizedMinDisplacement = this.minDisplacement / Math.max(0.1, handScale);
+    
+    // State machine
+    switch (this.state) {
+      case 'IDLE':
+        if (absMeanVx > this.minVelocity && absMeanVx > this.velocityRatio * absMeanVy) {
+          this.state = 'MOVING';
+          this.totalDisplacement = 0;
+          this.direction = meanVx > 0 ? 'RIGHT' : 'LEFT';
+          console.log(`[MOVE] Start ${this.direction} - v: ${absMeanVx.toFixed(4)}`);
+        }
+        break;
+        
+      case 'MOVING':
+        // Tích lũy displacement
+        if (velocities.length > 0) {
+          this.totalDisplacement += Math.abs(velocities[velocities.length - 1].vx);
+        }
+        const normalizedDisplacement = this.totalDisplacement / Math.max(0.1, handScale);
+        
+        // Kiểm tra đổi hướng (chỉ khi velocity cao)
+        const currentDir = meanVx > 0 ? 'RIGHT' : 'LEFT';
+        if (currentDir !== this.direction && absMeanVx > this.directionChangeThreshold) {
+          console.log(`[MOVE] Reset - đổi hướng`);
+          this.reset();
+          break;
+        }
+        
+        // Commit khi instant velocity giảm
+        if (instantAbsVx < this.commitVelocity) {
+          if (normalizedDisplacement >= normalizedMinDisplacement) {
+            this.state = 'COMMIT';
+            console.log(`[MOVE] Ready commit - disp: ${normalizedDisplacement.toFixed(3)}`);
+          } else {
+            console.log(`[MOVE] Reset - disp không đủ`);
+            this.reset();
+          }
+        }
+        break;
+        
+      case 'COMMIT':
+        // Xử lý handedness
+        let finalDir = this.direction;
+        if (handedness === 'Left') {
+          finalDir = this.direction === 'RIGHT' ? 'LEFT' : 'RIGHT';
+        }
+        
+        const normalizedDisp = this.totalDisplacement / Math.max(0.1, handScale);
+        const dispRatio = Math.min(1.0, normalizedDisp / normalizedMinDisplacement);
+        const velRatio = Math.min(1.0, absMeanVx / this.minVelocity);
+        const confidence = Math.max(0.7, (dispRatio + velRatio) / 2);
+        
+        console.log(`[MOVE] COMMIT ${finalDir} - disp: ${normalizedDisp.toFixed(3)}, conf: ${confidence.toFixed(2)}`);
+        
+        // Vào cooldown
+        this.state = 'COOLDOWN';
+        this.cooldownStartTime = Date.now();
+        this.totalDisplacement = 0;
+        this.direction = null;
+        
+        return {
+          gesture: finalDir === 'RIGHT' ? GESTURES.MOVE_RIGHT : GESTURES.MOVE_LEFT,
+          confidence
+        };
+        
+      case 'COOLDOWN':
+        const elapsed = Date.now() - this.cooldownStartTime;
+        if (elapsed >= this.cooldownDuration) {
+          this.state = 'IDLE';
+        }
+        break;
+    }
+    
+    return { gesture: GESTURES.NONE, confidence: 0 };
+  }
+
+  reset() {
+    this.state = 'IDLE';
+    this.direction = null;
+    this.totalDisplacement = 0;
+    this.cooldownStartTime = 0;
+  }
+
+  getState() {
+    return this.state;
+  }
+
+  getDebugInfo(handScale) {
+    if (this.rawPalmHistory.length < 2) {
+      return null;
+    }
+    
+    const velocities = [];
+    for (let i = 1; i < this.rawPalmHistory.length; i++) {
+      const prev = this.rawPalmHistory[i - 1];
+      const curr = this.rawPalmHistory[i];
+      velocities.push({ vx: curr.x - prev.x, vy: curr.y - prev.y });
+    }
+    
+    const recentVelocities = velocities.slice(-5);
+    const meanVx = recentVelocities.reduce((sum, v) => sum + v.vx, 0) / recentVelocities.length;
+    const instantVx = velocities[velocities.length - 1].vx;
+    const normalizedDisplacement = this.totalDisplacement / Math.max(0.1, handScale);
+    const normalizedMinDisplacement = this.minDisplacement / Math.max(0.1, handScale);
+    
+    return {
+      state: this.state,
+      meanVx: meanVx,
+      instantVx: instantVx,
+      displacement: normalizedDisplacement,
+      minDisplacement: normalizedMinDisplacement,
+      minVelocity: this.minVelocity,
+      commitVelocity: this.commitVelocity,
+      frames: this.rawPalmHistory.length
+    };
+  }
+}
+
+// ========== GESTURE DETECTOR (ORCHESTRATOR) ==========
+class GestureDetector {
+  constructor() {
+    this.handScale = 1.0;
+    this.staticDetector = new StaticGestureDetector();
+    this.pinchDetector = new PinchDetector();
+    this.moveStateMachine = new MoveStateMachine();
+  }
+
+  computeHandScale(landmarks) {
+    const wrist = landmarks[0];
+    const middleMCP = landmarks[9];
+    const dx = wrist.x - middleMCP.x;
+    const dy = wrist.y - middleMCP.y;
+    const dz = wrist.z - middleMCP.z;
+    return Math.hypot(dx, dy, dz);
+  }
+
+  detect(landmarks, handedness) {
+    if (!landmarks || landmarks.length < 21) {
+      return { gesture: GESTURES.NONE, confidence: 0 };
+    }
+
+    this.handScale = Math.max(0.01, this.computeHandScale(landmarks));
+    
+    // TÁCH TUYỆT ĐỐI: Dynamic trước, static sau
+    const moveResult = this.moveStateMachine.update(landmarks, this.handScale, handedness);
+    const moveState = this.moveStateMachine.getState();
+    
+    // Chỉ detect static/pinch khi MOVE ở IDLE hoặc COOLDOWN
+    let staticResult = { gesture: GESTURES.NONE, confidence: 0 };
+    let pinchResult = { gesture: GESTURES.NONE, confidence: 0 };
+    
+    if (moveState === 'IDLE' || moveState === 'COOLDOWN') {
+      staticResult = this.staticDetector.detect(landmarks, this.handScale);
+      pinchResult = this.pinchDetector.detect(landmarks, this.handScale);
+    }
+    
+    // Chọn gesture có confidence cao nhất
+    const candidates = [moveResult, staticResult, pinchResult]
+      .filter(g => g.gesture !== GESTURES.NONE);
+    
+    if (candidates.length === 0) {
+      return { gesture: GESTURES.NONE, confidence: 0 };
+    }
+    
+    // Ưu tiên: dynamic > static
+    candidates.sort((a, b) => {
+      const aIsDynamic = [GESTURES.PINCH, GESTURES.MOVE_LEFT, GESTURES.MOVE_RIGHT].includes(a.gesture);
+      const bIsDynamic = [GESTURES.PINCH, GESTURES.MOVE_LEFT, GESTURES.MOVE_RIGHT].includes(b.gesture);
+      if (aIsDynamic !== bIsDynamic) {
+        if (Math.abs(a.confidence - b.confidence) < 0.1) {
+          return aIsDynamic ? -1 : 1;
+        }
+      }
+      return b.confidence - a.confidence;
+    });
+    
+    const best = candidates[0];
+    return best.confidence > 0.5 ? best : { gesture: GESTURES.NONE, confidence: 0 };
+  }
+
+  reset() {
+    this.staticDetector.reset();
+    this.pinchDetector.reset();
+    this.moveStateMachine.reset();
   }
 }
 
@@ -146,7 +449,6 @@ function init() {
   const debugDiv = document.getElementById("debug");
   const stateDiv = document.getElementById("state");
 
-  // Khởi tạo camera
   navigator.mediaDevices.getUserMedia({
     video: { width: 1280, height: 720 }
   }).then(stream => {
@@ -168,41 +470,11 @@ function init() {
 
   // ========== ITEMS CAROUSEL ==========
   const items = [
-    {
-      name: "Nhẫn Vàng",
-      type: "ring",
-      color: 0xffd700,
-      size: 0.15,
-      thickness: 0.05
-    },
-    {
-      name: "Nhẫn Bạc",
-      type: "ring",
-      color: 0xc0c0c0,
-      size: 0.15,
-      thickness: 0.05
-    },
-    {
-      name: "Nhẫn Đồng",
-      type: "ring",
-      color: 0xcd7f32,
-      size: 0.15,
-      thickness: 0.05
-    },
-    {
-      name: "Vòng Vàng",
-      type: "bracelet",
-      color: 0xffd700,
-      size: 0.6,
-      thickness: 0.2
-    },
-    {
-      name: "Vòng Bạc",
-      type: "bracelet",
-      color: 0xc0c0c0,
-      size: 0.6,
-      thickness: 0.2
-    }
+    { name: "Nhẫn Vàng", type: "ring", color: 0xffd700, size: 0.15, thickness: 0.05 },
+    { name: "Nhẫn Bạc", type: "ring", color: 0xc0c0c0, size: 0.15, thickness: 0.05 },
+    { name: "Nhẫn Đồng", type: "ring", color: 0xcd7f32, size: 0.15, thickness: 0.05 },
+    { name: "Vòng Vàng", type: "bracelet", color: 0xffd700, size: 0.6, thickness: 0.2 },
+    { name: "Vòng Bạc", type: "bracelet", color: 0xc0c0c0, size: 0.6, thickness: 0.2 }
   ];
 
   let currentItemIndex = 0;
@@ -222,25 +494,21 @@ function init() {
   ring.visible = false;
   scene.add(ring);
 
-  // Hàm cập nhật item hiện tại
   function updateCurrentItem() {
     const item = items[currentItemIndex];
-    
     if (item.type === "bracelet") {
       bracelet.geometry.dispose();
       bracelet.geometry = new THREE.TorusGeometry(item.size, item.thickness, 16, 100);
       bracelet.material.color.setHex(item.color);
       bracelet.visible = true;
       ring.visible = false;
-    } else if (item.type === "ring") {
+    } else {
       ring.geometry.dispose();
       ring.geometry = new THREE.TorusGeometry(item.size, item.thickness, 16, 100);
       ring.material.color.setHex(item.color);
       ring.visible = true;
       bracelet.visible = false;
     }
-    
-    console.log(`Current item: ${item.name} (${currentItemIndex + 1}/${items.length})`);
   }
 
   updateCurrentItem();
@@ -249,19 +517,24 @@ function init() {
   const gestureDetector = new GestureDetector();
   let lastGesture = GESTURES.NONE;
   let lastGestureTime = 0;
-  const gestureCooldown = 300; // 300ms cooldown giữa các gesture
+  const gestureCooldown = 200;
 
-  // ========== EMA SMOOTHING ==========
+  // ========== EMA SMOOTHING (CHỈ CHO RENDER) ==========
   const SMOOTHING_ALPHA = 0.3;
-  let smoothedWrist = { x: 0, y: 0, z: 0 };
-  let smoothedIndexMCP = { x: 0, y: 0, z: 0 };
+  let smoothedLandmarks = null;
 
-  function smoothPosition(current, previous, alpha) {
-    return {
-      x: previous.x * (1 - alpha) + current.x * alpha,
-      y: previous.y * (1 - alpha) + current.y * alpha,
-      z: previous.z * (1 - alpha) + current.z * alpha
-    };
+  function smoothLandmarks(currentLandmarks, previousSmoothed, alpha) {
+    if (!previousSmoothed || previousSmoothed.length !== 21) {
+      return currentLandmarks.map(lm => ({ x: lm.x, y: lm.y, z: lm.z }));
+    }
+    return currentLandmarks.map((lm, idx) => {
+      const prev = previousSmoothed[idx];
+      return {
+        x: prev.x * (1 - alpha) + lm.x * alpha,
+        y: prev.y * (1 - alpha) + lm.y * alpha,
+        z: prev.z * (1 - alpha) + lm.z * alpha
+      };
+    });
   }
 
   // ========== MEDIAPIPE HANDS SETUP ==========
@@ -284,95 +557,71 @@ function init() {
     minTrackingConfidence: 0.5
   });
 
-  // Callback khi detect được tay
   hands.onResults((results) => {
     if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-      const landmarks = results.multiHandLandmarks[0];
-      const wrist = landmarks[0];
-      const indexMCP = landmarks[5];
+      const rawLandmarks = results.multiHandLandmarks[0];
+      const handedness = results.multiHandedness?.[0]?.categoryName || 'Unknown';
       
-      // Smoothing
-      smoothedWrist = smoothPosition(
-        { x: wrist.x, y: wrist.y, z: wrist.z },
-        smoothedWrist,
-        SMOOTHING_ALPHA
-      );
+      // EMA smoothing CHỈ cho render (không cho gesture detection)
+      smoothedLandmarks = smoothLandmarks(rawLandmarks, smoothedLandmarks, SMOOTHING_ALPHA);
       
-      smoothedIndexMCP = smoothPosition(
-        { x: indexMCP.x, y: indexMCP.y, z: indexMCP.z },
-        smoothedIndexMCP,
-        SMOOTHING_ALPHA
-      );
+      // Gesture detection dùng RAW landmarks (không smooth)
+      const result = gestureDetector.detect(rawLandmarks, handedness);
       
-      // Update objects position
+      // Render dùng smoothed landmarks
+      const smoothedWrist = smoothedLandmarks[0];
+      const smoothedIndexMCP = smoothedLandmarks[5];
       updateBraceletPosition(smoothedWrist, bracelet);
       updateRingPosition(smoothedIndexMCP, ring);
       
-      // Detect gesture
+      // Handle gesture
       const now = Date.now();
-      const currentGesture = gestureDetector.detect(landmarks);
-      
-      // Cooldown để tránh trigger liên tục
-      if (currentGesture !== GESTURES.NONE && 
-          (currentGesture !== lastGesture || now - lastGestureTime > gestureCooldown)) {
-        handleGesture(currentGesture);
-        lastGesture = currentGesture;
+      if (result.gesture !== GESTURES.NONE && 
+          (result.gesture !== lastGesture || now - lastGestureTime > gestureCooldown)) {
+        handleGesture(result.gesture, result.confidence);
+        lastGesture = result.gesture;
         lastGestureTime = now;
       }
       
-      // Debug info
-      updateDebug(debugDiv, smoothedWrist, currentGesture, landmarks);
+      // Debug
+      updateDebug(debugDiv, smoothedWrist, result, smoothedLandmarks, handedness);
       
     } else {
       debugDiv.textContent = "Không detect được tay";
       gestureDetector.reset();
+      smoothedLandmarks = null;
       bracelet.visible = false;
       ring.visible = false;
     }
   });
 
   // ========== GESTURE HANDLER ==========
-  function handleGesture(gesture) {
-    console.log(`Gesture detected: ${gesture}`);
+  function handleGesture(gesture, confidence) {
+    console.log(`Gesture: ${gesture} (confidence: ${confidence.toFixed(2)})`);
     
     switch (gesture) {
       case GESTURES.FIST:
-        // Nắm tay → có thể dùng để select/confirm
-        console.log('Nắm tay - Select item');
+        console.log('Nắm tay');
         break;
-        
       case GESTURES.MOVE_LEFT:
-        // Di chuyển trái → item trước
+        console.log('di chuyển trái');
         currentItemIndex = (currentItemIndex - 1 + items.length) % items.length;
         updateCurrentItem();
-        console.log(`← Item: ${items[currentItemIndex].name}`);
         break;
-        
       case GESTURES.MOVE_RIGHT:
-        // Di chuyển phải → item tiếp theo
+        console.log('di chuyển phải');
         currentItemIndex = (currentItemIndex + 1) % items.length;
         updateCurrentItem();
-        console.log(`→ Item: ${items[currentItemIndex].name}`);
         break;
-        
+      case GESTURES.PINCH:
+        console.log('Pinch');
+        break;
       case GESTURES.THUMB_UP:
-        console.log('👍 Ngón cái');
-        break;
-        
       case GESTURES.INDEX_UP:
-        console.log('👆 Ngón trỏ');
-        break;
-        
       case GESTURES.MIDDLE_UP:
-        console.log('🖕 Ngón giữa');
-        break;
-        
       case GESTURES.RING_UP:
-        console.log('💍 Ngón áp út');
-        break;
-        
       case GESTURES.PINKY_UP:
-        console.log('🤙 Ngón út');
+        console.log(`Ngón: ${gesture}`);
         break;
     }
   }
@@ -396,20 +645,43 @@ function init() {
   }
 
   // ========== DEBUG ==========
-  function updateDebug(debugDiv, wrist, gesture, landmarks) {
+  function updateDebug(debugDiv, wrist, result, landmarks, handedness) {
     const currentItem = items[currentItemIndex];
+    const staticDetector = gestureDetector.staticDetector;
+    const thumbExtended = staticDetector.isThumbExtended(landmarks, gestureDetector.handScale);
+    const indexExtended = staticDetector.isFingerExtended(landmarks, [5, 6, 7, 8]);
+    const middleExtended = staticDetector.isFingerExtended(landmarks, [9, 10, 11, 12]);
+    const ringExtended = staticDetector.isFingerExtended(landmarks, [13, 14, 15, 16]);
+    const pinkyExtended = staticDetector.isFingerExtended(landmarks, [17, 18, 19, 20]);
     
-    // Đếm số ngón duỗi
-    const thumbExtended = gestureDetector.isFingerExtended(landmarks, [1, 2, 3, 4]);
-    const indexExtended = gestureDetector.isFingerExtended(landmarks, [5, 6, 7, 8]);
-    const middleExtended = gestureDetector.isFingerExtended(landmarks, [9, 10, 11, 12]);
-    const ringExtended = gestureDetector.isFingerExtended(landmarks, [13, 14, 15, 16]);
-    const pinkyExtended = gestureDetector.isFingerExtended(landmarks, [17, 18, 19, 20]);
+    // Debug info từ MoveStateMachine (khớp logic thật)
+    const moveDebug = gestureDetector.moveStateMachine.getDebugInfo(gestureDetector.handScale);
     
     let info = `<strong>Hand Detected</strong><br>`;
+    info += `Hand: ${handedness}<br>`;
+    info += `Scale: ${gestureDetector.handScale.toFixed(3)}<br>`;
     info += `Wrist: x=${wrist.x.toFixed(3)}, y=${wrist.y.toFixed(3)}<br>`;
     info += `Item: ${currentItem.name} (${currentItemIndex + 1}/${items.length})<br>`;
-    info += `<br><strong>Gesture: ${gesture}</strong><br>`;
+    info += `<br><strong>Gesture: ${result.gesture}</strong><br>`;
+    info += `Confidence: ${(result.confidence * 100).toFixed(0)}%<br>`;
+    info += `Pinch State: ${gestureDetector.pinchDetector.state}<br>`;
+    
+    if (moveDebug) {
+      info += `<br><strong>MOVE State: ${moveDebug.state}</strong><br>`;
+      info += `Mean Velocity: ${moveDebug.meanVx.toFixed(4)}<br>`;
+      info += `Instant Velocity: ${moveDebug.instantVx.toFixed(4)}<br>`;
+      info += `Min Velocity: ${moveDebug.minVelocity.toFixed(4)}<br>`;
+      info += `Commit Velocity: ${moveDebug.commitVelocity.toFixed(4)}<br>`;
+      info += `Displacement: ${moveDebug.displacement.toFixed(3)}<br>`;
+      info += `Min Displacement: ${moveDebug.minDisplacement.toFixed(3)}<br>`;
+      info += `Frames: ${moveDebug.frames}<br>`;
+      if (moveDebug.state === 'COOLDOWN') {
+        const remaining = gestureDetector.moveStateMachine.cooldownDuration - 
+          (Date.now() - gestureDetector.moveStateMachine.cooldownStartTime);
+        info += `Cooldown: ${Math.max(0, Math.round(remaining))}ms<br>`;
+      }
+    }
+    
     info += `<br>Ngón tay:<br>`;
     info += `Cái: ${thumbExtended ? '✓' : '✗'}<br>`;
     info += `Trỏ: ${indexExtended ? '✓' : '✗'}<br>`;
@@ -418,7 +690,7 @@ function init() {
     info += `Út: ${pinkyExtended ? '✓' : '✗'}<br>`;
     
     debugDiv.innerHTML = info;
-    stateDiv.textContent = `Gesture: ${gesture}`;
+    stateDiv.textContent = `${result.gesture} (${(result.confidence * 100).toFixed(0)}%)`;
   }
 
   // ========== CAMERA PROCESSING ==========
@@ -447,7 +719,6 @@ function init() {
 
   animate();
 
-  // Resize handler
   window.addEventListener("resize", () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
