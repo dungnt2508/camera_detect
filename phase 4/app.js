@@ -12,7 +12,10 @@ const GESTURES = {
   THUMB_UP: 'THUMB_UP',
   PINCH: 'PINCH',
   MOVE_LEFT: 'MOVE_LEFT',
-  MOVE_RIGHT: 'MOVE_RIGHT'
+  MOVE_RIGHT: 'MOVE_RIGHT',
+  MOVE_UP: 'MOVE_UP',
+  MOVE_DOWN: 'MOVE_DOWN',
+  FIST_HOLD: 'FIST_HOLD' // FIST hold 1s
 };
 
 class StaticGestureDetector {
@@ -103,6 +106,75 @@ class StaticGestureDetector {
 
   reset() {
     this.gestureHistory = [];
+  }
+}
+
+class FistHoldDetector {
+  constructor() {
+    this.state = 'OPEN';
+    this.holdStartTime = 0;
+    this.holdDuration = 1000; // Hold 1s
+    this.minFrames = 5; // Cần 5 frames liên tiếp là FIST
+    this.fistFrames = 0;
+  }
+
+  detect(isFist) {
+    const now = Date.now();
+
+    switch (this.state) {
+      case 'OPEN':
+        if (isFist) {
+          this.fistFrames++;
+          if (this.fistFrames >= this.minFrames) {
+            this.state = 'HOLDING';
+            this.holdStartTime = now;
+            this.fistFrames = 0;
+          }
+        } else {
+          this.fistFrames = 0;
+        }
+        break;
+
+      case 'HOLDING':
+        if (!isFist) {
+          this.state = 'OPEN';
+          this.holdStartTime = 0;
+        } else {
+          const holdTime = now - this.holdStartTime;
+          if (holdTime >= this.holdDuration) {
+            this.state = 'COMMITTED';
+            return { gesture: GESTURES.FIST_HOLD, confidence: 0.9 };
+          }
+        }
+        break;
+
+      case 'COMMITTED':
+        if (!isFist) {
+          this.state = 'OPEN';
+          this.holdStartTime = 0;
+        }
+        break;
+    }
+
+    return { gesture: GESTURES.NONE, confidence: 0 };
+  }
+
+  reset() {
+    this.state = 'OPEN';
+    this.holdStartTime = 0;
+    this.fistFrames = 0;
+  }
+
+  getState() {
+    return this.state;
+  }
+
+  getDebugInfo() {
+    return {
+      state: this.state,
+      fistFrames: this.fistFrames,
+      holdTime: this.holdStartTime > 0 ? Date.now() - this.holdStartTime : 0
+    };
   }
 }
 
@@ -203,6 +275,107 @@ class PinchDetector {
       timeSinceCandidate: this.holdStartTime > 0 ? Date.now() - this.holdStartTime : 0,
       releaseGating: this.releaseStartTime > 0 ? Date.now() - this.releaseStartTime : 0
     };
+  }
+}
+
+class VerticalMoveDetector {
+  constructor() {
+    this.startThreshold = 0.04;
+    this.commitThreshold = 0.15;
+    this.maxDuration = 400;
+    this.cooldownDuration = 250;
+
+    this.state = 'IDLE';
+    this.startY = 0;
+    this.startTime = 0;
+    this.cooldownStartTime = 0;
+  }
+
+  getWristY(landmarks) {
+    const wrist = landmarks[0];
+    return wrist.y;
+  }
+
+  update(landmarks, handScale) {
+    if (!landmarks || landmarks.length < 21) {
+      return { gesture: GESTURES.NONE, confidence: 0 };
+    }
+
+    const currentY = this.getWristY(landmarks);
+    const now = Date.now();
+
+    // Reset cooldown nếu đã hết
+    if (this.cooldownStartTime > 0 && now - this.cooldownStartTime >= this.cooldownDuration) {
+      this.cooldownStartTime = 0;
+    }
+
+    // Nếu đang trong cooldown và không phải IDLE, không xử lý gesture
+    if (this.cooldownStartTime > 0 && this.state !== 'IDLE') {
+      return { gesture: GESTURES.NONE, confidence: 0 };
+    }
+
+    switch (this.state) {
+      case 'IDLE': {
+        if (this.startTime === 0) {
+          this.startY = currentY;
+          this.startTime = now;
+          break;
+        }
+      
+        const dy = currentY - this.startY;
+        const dyNorm = Math.abs(dy) / Math.max(0.01, handScale);
+      
+        if (dyNorm >= this.startThreshold) {
+          this.state = 'TRACKING';
+        }
+        break;
+      }
+
+      case 'TRACKING': {
+        const dy = currentY - this.startY;
+        const dyNorm = dy / Math.max(0.01, handScale);
+        const elapsed = now - this.startTime;
+      
+        if (Math.abs(dyNorm) >= this.commitThreshold && elapsed <= this.maxDuration) {
+          this.cooldownStartTime = now;
+          this.reset();
+          return {
+            gesture: dyNorm < 0 ? GESTURES.MOVE_UP : GESTURES.MOVE_DOWN,
+            confidence: 1.0
+          };
+        }
+      
+        if (elapsed > this.maxDuration) {
+          this.reset();
+        }
+        break;
+      }
+
+      default: {
+        return { gesture: GESTURES.NONE, confidence: 0 };
+      }
+    }
+    
+    return { gesture: GESTURES.NONE, confidence: 0 };
+  }
+
+  reset() {
+    this.state = 'IDLE';
+    this.startY = 0;
+    this.startTime = 0;
+  }
+
+  getState() {
+    const now = Date.now();
+    if (this.cooldownStartTime > 0 && now - this.cooldownStartTime < this.cooldownDuration) {
+      return 'COOLDOWN';
+    }
+    
+    if (this.cooldownStartTime > 0 && now - this.cooldownStartTime >= this.cooldownDuration) {
+      this.cooldownStartTime = 0;
+    }
+    
+    return this.state;
   }
 }
 
@@ -447,7 +620,9 @@ class GestureDetector {
     this.handScale = 1.0;
     this.staticDetector = new StaticGestureDetector();
     this.pinchDetector = new PinchDetector();
+    this.fistHoldDetector = new FistHoldDetector();
     this.moveStateMachine = new MoveStateMachine();
+    this.verticalMoveDetector = new VerticalMoveDetector();
   }
 
   computeHandScale(landmarks) {
@@ -459,13 +634,24 @@ class GestureDetector {
     return Math.hypot(dx, dy, dz);
   }
 
-  detect(landmarks, handedness) {
+  detect(landmarks, handedness, appState = 'ACTIVE') {
     if (!landmarks || landmarks.length < 21) {
       return { gesture: GESTURES.NONE, confidence: 0 };
     }
 
     this.handScale = Math.max(0.01, this.computeHandScale(landmarks));
     
+    // TRY_ON: Chỉ detect vertical move cho zoom
+    if (appState === 'TRY_ON') {
+      const verticalResult = this.verticalMoveDetector.update(landmarks, this.handScale);
+      if (verticalResult.gesture !== GESTURES.NONE) {
+        return verticalResult;
+      }
+      // Trong TRY_ON, không detect gesture khác
+      return { gesture: GESTURES.NONE, confidence: 0 };
+    }
+    
+    // BROWSE và ACTIVE: Detect horizontal move, FIST hold, và static gestures
     const moveResult = this.moveStateMachine.update(landmarks, this.handScale, handedness);
     const moveState = this.moveStateMachine.getState();
     
@@ -479,8 +665,24 @@ class GestureDetector {
     
     let staticResult = { gesture: GESTURES.NONE, confidence: 0 };
     let pinchResult = { gesture: GESTURES.NONE, confidence: 0 };
+    let fistHoldResult = { gesture: GESTURES.NONE, confidence: 0 };
     
     if (moveState === 'IDLE' || moveState === 'COOLDOWN') {
+      // Detect static gesture trước để biết có FIST không
+      staticResult = this.staticDetector.detect(landmarks, this.handScale);
+      const isFist = staticResult.gesture === GESTURES.FIST;
+      
+      // Detect FIST hold (chỉ trong BROWSE)
+      if (appState === 'BROWSE' && isFist) {
+        fistHoldResult = this.fistHoldDetector.detect(true);
+        if (fistHoldResult.gesture !== GESTURES.NONE) {
+          return fistHoldResult;
+        }
+      } else {
+        this.fistHoldDetector.detect(isFist);
+      }
+      
+      // Detect PINCH
       pinchResult = this.pinchDetector.detect(landmarks, this.handScale);
       const pinchState = this.pinchDetector.getState();
       
@@ -488,13 +690,18 @@ class GestureDetector {
         return pinchResult;
       }
       
-      if (pinchState === 'OPEN') {
-        staticResult = this.staticDetector.detect(landmarks, this.handScale);
+      // Nếu không phải PINCH, return static result
+      if (pinchState === 'OPEN' && staticResult.gesture !== GESTURES.NONE) {
+        return staticResult;
       }
     }
     
     if (pinchResult.gesture !== GESTURES.NONE) {
       return pinchResult;
+    }
+    
+    if (fistHoldResult.gesture !== GESTURES.NONE) {
+      return fistHoldResult;
     }
     
     if (staticResult.gesture !== GESTURES.NONE) {
@@ -507,7 +714,9 @@ class GestureDetector {
   reset() {
     this.staticDetector.reset();
     this.pinchDetector.reset();
+    this.fistHoldDetector.reset();
     this.moveStateMachine.reset();
+    this.verticalMoveDetector.reset();
   }
 }
 
@@ -546,6 +755,10 @@ function init() {
   ];
 
   let currentItemIndex = 0;
+  let itemScale = 1.0; // Zoom scale cho item
+  const MIN_SCALE = 0.5;
+  const MAX_SCALE = 2.0;
+  const SCALE_STEP = 0.1;
 
   const braceletGeometry = new THREE.TorusGeometry(0.6, 0.2, 16, 100);
   const braceletMaterial = new THREE.MeshStandardMaterial({ color: 0xffd700 });
@@ -571,6 +784,7 @@ function init() {
       bracelet.material.color.setHex(item.color);
       bracelet.visible = true;
       ring.visible = false;
+      bracelet.scale.set(itemScale, itemScale, itemScale);
     } else {
       if (ring.geometry) {
         ring.geometry.dispose();
@@ -579,7 +793,26 @@ function init() {
       ring.material.color.setHex(item.color);
       ring.visible = true;
       bracelet.visible = false;
+      ring.scale.set(itemScale, itemScale, itemScale);
     }
+  }
+  
+  function resetZoom() {
+    itemScale = 1.0;
+    bracelet.scale.set(1, 1, 1);
+    ring.scale.set(1, 1, 1);
+  }
+  
+  function zoomIn() {
+    itemScale = Math.min(MAX_SCALE, itemScale + SCALE_STEP);
+    bracelet.scale.set(itemScale, itemScale, itemScale);
+    ring.scale.set(itemScale, itemScale, itemScale);
+  }
+  
+  function zoomOut() {
+    itemScale = Math.max(MIN_SCALE, itemScale - SCALE_STEP);
+    bracelet.scale.set(itemScale, itemScale, itemScale);
+    ring.scale.set(itemScale, itemScale, itemScale);
   }
 
   updateCurrentItem();
@@ -589,7 +822,7 @@ function init() {
 
   const SMOOTHING_ALPHA = 0.3;
   let smoothedLandmarks = null;
-  let lastPinchState = 'OPEN';
+  let lastFistState = 'OPEN';
 
   function smoothLandmarks(currentLandmarks, previousSmoothed, alpha) {
     if (!previousSmoothed || previousSmoothed.length !== 21) {
@@ -638,7 +871,7 @@ function init() {
       let result = { gesture: GESTURES.NONE, confidence: 0 };
       
       if (currentAppState === 'ACTIVE' || currentAppState === 'BROWSE' || currentAppState === 'TRY_ON') {
-        result = gestureDetector.detect(smoothedLandmarks, handedness);
+        result = gestureDetector.detect(smoothedLandmarks, handedness, currentAppState);
       }
       
       const smoothedWrist = smoothedLandmarks[0];
@@ -653,13 +886,14 @@ function init() {
         ring.visible = false;
       }
       
-      // Track PINCH state change để xử lý release trong TRY_ON
-      const currentPinchState = gestureDetector.pinchDetector.getState();
-      if (currentAppState === 'TRY_ON' && lastPinchState === 'COMMITTED' && currentPinchState === 'OPEN') {
-        // PINCH released → quay về BROWSE
+      // Track FIST state change để xử lý release trong TRY_ON
+      const currentFistState = gestureDetector.fistHoldDetector.getState();
+      if (currentAppState === 'TRY_ON' && lastFistState === 'COMMITTED' && currentFistState === 'OPEN') {
+        // FIST released → quay về BROWSE và reset zoom
+        resetZoom();
         appStateMachine.transitionTo('BROWSE');
       }
-      lastPinchState = currentPinchState;
+      lastFistState = currentFistState;
       
       // Xử lý gesture dựa trên state - logic không chồng chéo
       if (result.gesture !== GESTURES.NONE) {
@@ -679,7 +913,7 @@ function init() {
       smoothedLandmarks = null;
       bracelet.visible = false;
       ring.visible = false;
-      lastPinchState = 'OPEN';
+      lastFistState = 'OPEN';
     }
   });
 
@@ -699,10 +933,6 @@ function init() {
           }
           updateCurrentItem();
         }
-        // ACTIVE → TRY_ON: Hold 1s (PINCH)
-        else if (gesture === GESTURES.PINCH) {
-          appStateMachine.transitionTo('TRY_ON');
-        }
         break;
 
       case 'BROWSE':
@@ -714,15 +944,23 @@ function init() {
           currentItemIndex = (currentItemIndex + 1) % items.length;
           updateCurrentItem();
         }
-        // BROWSE → TRY_ON: Hold 1s (PINCH)
-        else if (gesture === GESTURES.PINCH) {
+        // BROWSE → TRY_ON: Nắm tay (FIST) hold 1s
+        else if (gesture === GESTURES.FIST_HOLD) {
+          resetZoom(); // Reset zoom khi vào TRY_ON
           appStateMachine.transitionTo('TRY_ON');
         }
         break;
 
       case 'TRY_ON':
-        // TRY_ON: Chỉ hiển thị item, release được xử lý ở onResults
-        // Không cần xử lý gesture ở đây
+        // TRY_ON: Zoom-in/zoom-out với swipe lên/xuống
+        if (gesture === GESTURES.MOVE_UP) {
+          zoomIn();
+          console.log(`Zoom in: ${itemScale.toFixed(2)}`);
+        } else if (gesture === GESTURES.MOVE_DOWN) {
+          zoomOut();
+          console.log(`Zoom out: ${itemScale.toFixed(2)}`);
+        }
+        // FIST release được xử lý ở onResults
         break;
 
       default:
@@ -759,6 +997,7 @@ function init() {
     
     const moveDebug = gestureDetector.moveStateMachine.getDebugInfo(landmarks, gestureDetector.handScale, handedness);
     const pinchDebug = gestureDetector.pinchDetector.getDebugInfo();
+    const fistHoldDebug = gestureDetector.fistHoldDetector.getDebugInfo();
     
     let info = `<strong>APP STATE: ${appState}</strong><br>`;
     info += `<br><strong>Hand Detected</strong><br>`;
@@ -768,10 +1007,19 @@ function init() {
     
     if (appState === 'BROWSE' || appState === 'TRY_ON') {
       info += `Item: ${currentItem.name} (${currentItemIndex + 1}/${items.length})<br>`;
+      if (appState === 'TRY_ON') {
+        info += `Zoom: ${(itemScale * 100).toFixed(0)}%<br>`;
+      }
     }
     
     info += `<br><strong>Gesture: ${result.gesture}</strong><br>`;
     info += `Confidence: ${(result.confidence * 100).toFixed(0)}%<br>`;
+    
+    if (fistHoldDebug) {
+      info += `<br><strong>FIST HOLD State: ${fistHoldDebug.state}</strong><br>`;
+      info += `Fist Frames: ${fistHoldDebug.fistFrames}<br>`;
+      info += `Hold Time: ${Math.round(fistHoldDebug.holdTime)}ms<br>`;
+    }
     
     if (pinchDebug) {
       info += `<br><strong>PINCH State: ${pinchDebug.state}</strong><br>`;
