@@ -68,7 +68,6 @@ class StaticGestureDetector {
     const pinkyExtended = this.isFingerExtended(landmarks, [17, 18, 19, 20]);
     
     const extendedFingers = [
-      thumbExtended,
       indexExtended,
       middleExtended,
       ringExtended,
@@ -76,11 +75,12 @@ class StaticGestureDetector {
     ].filter(Boolean).length;
     
     let gesture = GESTURES.NONE;
-    if (extendedFingers === 0) {
+    if (extendedFingers === 0 && !thumbExtended) {
       gesture = GESTURES.FIST;
+    } else if (extendedFingers === 0 && thumbExtended) {
+      gesture = GESTURES.THUMB_UP;
     } else if (extendedFingers === 1) {
-      if (thumbExtended) gesture = GESTURES.THUMB_UP;
-      else if (indexExtended) gesture = GESTURES.INDEX_UP;
+      if (indexExtended) gesture = GESTURES.INDEX_UP;
       else if (middleExtended) gesture = GESTURES.MIDDLE_UP;
       else if (ringExtended) gesture = GESTURES.RING_UP;
       else if (pinkyExtended) gesture = GESTURES.PINKY_UP;
@@ -125,6 +125,7 @@ class PinchDetector {
     this.holdDuration = 150;
     this.startThreshold = 0.25;
     this.endThreshold = 0.35;
+    this.committed = false;
   }
 
   distance(p1, p2) {
@@ -144,6 +145,7 @@ class PinchDetector {
     
     switch (this.state) {
       case 'OPEN':
+        this.committed = false;
         if (normalizedDist < this.startThreshold) {
           this.startFrames++;
           if (this.startFrames >= 3) {
@@ -169,7 +171,8 @@ class PinchDetector {
           this.state = 'RELEASE';
         } else {
           const holdTime = now - this.holdStartTime;
-          if (holdTime >= this.holdDuration) {
+          if (holdTime >= this.holdDuration && !this.committed) {
+            this.committed = true;
             return { gesture: GESTURES.PINCH, confidence: 0.8 };
           }
         }
@@ -186,157 +189,187 @@ class PinchDetector {
   reset() {
     this.state = 'OPEN';
     this.startFrames = 0;
+    this.committed = false;
   }
 }
 
 // ========== MOVE STATE MACHINE ==========
 class MoveStateMachine {
   constructor() {
-    // Parameters
-    this.minVelocity = 0.06; // KHÔNG normalize
-    this.minDisplacement = 0.08; // Sẽ normalize theo handScale
-    this.commitVelocity = 0.02; // KHÔNG normalize
-    this.velocityRatio = 1.5; // |vx| > ratio * |vy|
-    this.directionChangeThreshold = 0.1; // Velocity để coi là đổi hướng
-    
-    // State
-    this.state = 'IDLE'; // IDLE, MOVING, COMMIT, COOLDOWN
-    this.direction = null; // 'LEFT' hoặc 'RIGHT'
-    this.cooldownDuration = 1000; // ms
+    // ===== PARAMETERS =====
+    this.minVelocity = 0.06;          // mean vx (raw, đã flip handedness)
+    this.minDisplacement = 0.12;      // NORMALIZED (đã chia handScale)
+    this.velocityRatio = 1.5;         // |vx| > ratio * |vy|
+    this.minMovingDuration = 50;      // milliseconds
+    this.velocityWindowDuration = 200; // milliseconds
+    this.directionChangeThreshold = 0.1;
+
+    // ===== STATE =====
+    this.state = 'IDLE';              // IDLE → MOVING → COMMIT → COOLDOWN
+    this.direction = null;            // 'LEFT' | 'RIGHT'
+    this.cooldownDuration = 600;
     this.cooldownStartTime = 0;
-    
-    // Tracking (KHÔNG dùng EMA - dùng raw landmarks)
-    this.rawPalmHistory = []; // Raw palm positions (không smooth)
-    this.totalDisplacement = 0; // Tích lũy |vx|
+
+    // ===== TRACKING =====
+    this.rawPalmHistory = [];
+    this.palmHistoryWithTime = [];
     this.windowSize = 20;
     this.frameCount = 0;
+
+    this.totalDisplacement = 0;       // NORMALIZED, có dấu
+    this.movingStartTime = 0;
+    this.moveHandScale = 1.0;
   }
 
   computePalmCenter(landmarks) {
-    const wrist = landmarks[0];
-    const indexMCP = landmarks[5];
-    const middleMCP = landmarks[9];
-    const ringMCP = landmarks[13];
-    const pinkyMCP = landmarks[17];
+    const ids = [0, 5, 9, 13, 17];
+    const p = ids.map(i => landmarks[i]);
     return {
-      x: (wrist.x + indexMCP.x + middleMCP.x + ringMCP.x + pinkyMCP.x) / 5,
-      y: (wrist.y + indexMCP.y + middleMCP.y + ringMCP.y + pinkyMCP.y) / 5,
-      z: (wrist.z + indexMCP.z + middleMCP.z + ringMCP.z + pinkyMCP.z) / 5
+      x: p.reduce((s, v) => s + v.x, 0) / 5,
+      y: p.reduce((s, v) => s + v.y, 0) / 5,
+      z: p.reduce((s, v) => s + v.z, 0) / 5
     };
   }
 
+  computeMoveHandScale(landmarks) {
+    const a = landmarks[5];
+    const b = landmarks[17];
+    return Math.max(
+      0.01,
+      Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z)
+    );
+  }
+
   update(landmarks, handScale, handedness) {
-    // Dùng RAW landmarks (không EMA) cho swipe detection
     const palm = this.computePalmCenter(landmarks);
+    const now = Date.now();
     this.frameCount++;
-    
-    // Cập nhật raw palm history
-    this.rawPalmHistory.push({ x: palm.x, y: palm.y, frame: this.frameCount });
+
+    this.moveHandScale = this.computeMoveHandScale(landmarks);
+
+    this.rawPalmHistory.push({ x: palm.x, y: palm.y });
+    this.palmHistoryWithTime.push({ x: palm.x, y: palm.y, t: now });
     if (this.rawPalmHistory.length > this.windowSize) {
       this.rawPalmHistory.shift();
     }
-    
-    if (this.rawPalmHistory.length < 3) {
+    while (this.palmHistoryWithTime.length > 0 && 
+           now - this.palmHistoryWithTime[0].t > this.velocityWindowDuration) {
+      this.palmHistoryWithTime.shift();
+    }
+    if (this.palmHistoryWithTime.length < 2) {
       return { gesture: GESTURES.NONE, confidence: 0 };
     }
-    
-    // Tính velocity (frame-based)
+
+    // ===== VELOCITY (TIME-BASED) =====
     const velocities = [];
-    for (let i = 1; i < this.rawPalmHistory.length; i++) {
-      const prev = this.rawPalmHistory[i - 1];
-      const curr = this.rawPalmHistory[i];
-      velocities.push({ vx: curr.x - prev.x, vy: curr.y - prev.y });
+    for (let i = 1; i < this.palmHistoryWithTime.length; i++) {
+      const dt = (this.palmHistoryWithTime[i].t - this.palmHistoryWithTime[i - 1].t) / 1000.0;
+      if (dt <= 0) continue;
+      let vx = (this.palmHistoryWithTime[i].x - this.palmHistoryWithTime[i - 1].x) / dt;
+      const vy = (this.palmHistoryWithTime[i].y - this.palmHistoryWithTime[i - 1].y) / dt;
+      if (handedness === 'Left') vx = -vx;
+      velocities.push({ vx, vy, t: this.palmHistoryWithTime[i].t });
     }
-    
-    const recentVelocities = velocities.slice(-5);
-    const meanVx = recentVelocities.reduce((sum, v) => sum + v.vx, 0) / recentVelocities.length;
-    const meanVy = recentVelocities.reduce((sum, v) => sum + v.vy, 0) / recentVelocities.length;
+
+    if (velocities.length === 0) {
+      return { gesture: GESTURES.NONE, confidence: 0 };
+    }
+
+    const meanVx = velocities.reduce((s, v) => s + v.vx, 0) / velocities.length;
+    const meanVy = velocities.reduce((s, v) => s + v.vy, 0) / velocities.length;
     const absMeanVx = Math.abs(meanVx);
     const absMeanVy = Math.abs(meanVy);
-    const instantVx = velocities[velocities.length - 1].vx;
-    const instantAbsVx = Math.abs(instantVx);
-    
-    // Normalize displacement theo handScale
-    const normalizedMinDisplacement = this.minDisplacement / Math.max(0.1, handScale);
-    
-    // State machine
+    const lastVx = velocities[velocities.length - 1].vx;
+
+    // ===== STATE MACHINE =====
     switch (this.state) {
-      case 'IDLE':
-        if (absMeanVx > this.minVelocity && absMeanVx > this.velocityRatio * absMeanVy) {
+      case 'IDLE': {
+        if (
+          absMeanVx > this.minVelocity &&
+          absMeanVx > this.velocityRatio * absMeanVy
+        ) {
           this.state = 'MOVING';
-          this.totalDisplacement = 0;
           this.direction = meanVx > 0 ? 'RIGHT' : 'LEFT';
-          console.log(`[MOVE] Start ${this.direction} - v: ${absMeanVx.toFixed(4)}`);
+          this.totalDisplacement = 0;
+          this.movingStartTime = now;
         }
-        break;
-        
-      case 'MOVING':
-        // Tích lũy displacement
-        if (velocities.length > 0) {
-          this.totalDisplacement += Math.abs(velocities[velocities.length - 1].vx);
-        }
-        const normalizedDisplacement = this.totalDisplacement / Math.max(0.1, handScale);
-        
-        // Kiểm tra đổi hướng (chỉ khi velocity cao)
-        const currentDir = meanVx > 0 ? 'RIGHT' : 'LEFT';
-        if (currentDir !== this.direction && absMeanVx > this.directionChangeThreshold) {
-          console.log(`[MOVE] Reset - đổi hướng`);
+        return { gesture: GESTURES.NONE, confidence: 0 };
+      }
+
+      case 'MOVING': {
+        const expectedSign = this.direction === 'RIGHT' ? 1 : -1;
+
+        // đổi hướng mạnh → reset
+        if (
+          Math.sign(meanVx) !== expectedSign &&
+          absMeanVx > this.directionChangeThreshold
+        ) {
           this.reset();
-          break;
+          return { gesture: GESTURES.NONE, confidence: 0 };
         }
-        
-        // Commit khi instant velocity giảm
-        if (instantAbsVx < this.commitVelocity) {
-          if (normalizedDisplacement >= normalizedMinDisplacement) {
-            this.state = 'COMMIT';
-            console.log(`[MOVE] Ready commit - disp: ${normalizedDisplacement.toFixed(3)}`);
-          } else {
-            console.log(`[MOVE] Reset - disp không đủ`);
-            this.reset();
+
+        // tích lũy displacement (NORMALIZED, TIME-BASED)
+        if (Math.sign(lastVx) === expectedSign && velocities.length >= 2) {
+          const dt = (velocities[velocities.length - 1].t - velocities[velocities.length - 2].t) / 1000.0;
+          if (dt > 0) {
+            this.totalDisplacement += (lastVx * dt) / this.moveHandScale;
           }
         }
-        break;
-        
-      case 'COMMIT':
-        // Xử lý handedness
-        let finalDir = this.direction;
-        if (handedness === 'Left') {
-          finalDir = this.direction === 'RIGHT' ? 'LEFT' : 'RIGHT';
+
+        const movingDuration = now - this.movingStartTime;
+        const absDisp = Math.abs(this.totalDisplacement);
+
+        if (
+          absDisp >= this.minDisplacement &&
+          absMeanVx >= this.minVelocity &&
+          movingDuration >= this.minMovingDuration
+        ) {
+          this.state = 'COMMIT';
         }
-        
-        const normalizedDisp = this.totalDisplacement / Math.max(0.1, handScale);
-        const dispRatio = Math.min(1.0, normalizedDisp / normalizedMinDisplacement);
-        const velRatio = Math.min(1.0, absMeanVx / this.minVelocity);
+
+        return { gesture: GESTURES.NONE, confidence: 0 };
+      }
+
+      case 'COMMIT': {
+        const absDisp = Math.abs(this.totalDisplacement);
+        const dispRatio = Math.min(1, absDisp / this.minDisplacement);
+        const velRatio = Math.min(1, absMeanVx / this.minVelocity);
         const confidence = Math.max(0.7, (dispRatio + velRatio) / 2);
-        
-        console.log(`[MOVE] COMMIT ${finalDir} - disp: ${normalizedDisp.toFixed(3)}, conf: ${confidence.toFixed(2)}`);
-        
-        // Vào cooldown
+
+        const gesture =
+          this.direction === 'RIGHT'
+            ? GESTURES.MOVE_RIGHT
+            : GESTURES.MOVE_LEFT;
+
         this.state = 'COOLDOWN';
         this.cooldownStartTime = Date.now();
-        this.totalDisplacement = 0;
-        this.direction = null;
-        
-        return {
-          gesture: finalDir === 'RIGHT' ? GESTURES.MOVE_RIGHT : GESTURES.MOVE_LEFT,
-          confidence
-        };
-        
-      case 'COOLDOWN':
-        const elapsed = Date.now() - this.cooldownStartTime;
-        if (elapsed >= this.cooldownDuration) {
+        this.resetMotion();
+
+        return { gesture, confidence };
+      }
+
+      case 'COOLDOWN': {
+        if (Date.now() - this.cooldownStartTime >= this.cooldownDuration) {
           this.state = 'IDLE';
         }
-        break;
+        return { gesture: GESTURES.NONE, confidence: 0 };
+      }
+
+      default: {
+        return { gesture: GESTURES.NONE, confidence: 0 };
+      }
     }
-    
-    return { gesture: GESTURES.NONE, confidence: 0 };
+  }
+
+  resetMotion() {
+    this.direction = null;
+    this.totalDisplacement = 0;
+    this.movingStartTime = 0;
   }
 
   reset() {
     this.state = 'IDLE';
-    this.direction = null;
-    this.totalDisplacement = 0;
+    this.resetMotion();
     this.cooldownStartTime = 0;
   }
 
@@ -344,36 +377,62 @@ class MoveStateMachine {
     return this.state;
   }
 
-  getDebugInfo(handScale) {
-    if (this.rawPalmHistory.length < 2) {
+  getDebugInfo(handedness) {
+    if (this.palmHistoryWithTime.length < 2) {
       return null;
     }
-    
+
+    const now = Date.now();
     const velocities = [];
-    for (let i = 1; i < this.rawPalmHistory.length; i++) {
-      const prev = this.rawPalmHistory[i - 1];
-      const curr = this.rawPalmHistory[i];
-      velocities.push({ vx: curr.x - prev.x, vy: curr.y - prev.y });
+    for (let i = 1; i < this.palmHistoryWithTime.length; i++) {
+      const dt = (this.palmHistoryWithTime[i].t - this.palmHistoryWithTime[i - 1].t) / 1000.0;
+      if (dt <= 0) continue;
+      let vx = (this.palmHistoryWithTime[i].x - this.palmHistoryWithTime[i - 1].x) / dt;
+      const vy = (this.palmHistoryWithTime[i].y - this.palmHistoryWithTime[i - 1].y) / dt;
+      if (handedness === 'Left') vx = -vx;
+      velocities.push({ vx, vy });
     }
-    
-    const recentVelocities = velocities.slice(-5);
-    const meanVx = recentVelocities.reduce((sum, v) => sum + v.vx, 0) / recentVelocities.length;
+
+    if (velocities.length === 0) {
+      return null;
+    }
+
+    const meanVx = velocities.reduce((s, v) => s + v.vx, 0) / velocities.length;
     const instantVx = velocities[velocities.length - 1].vx;
-    const normalizedDisplacement = this.totalDisplacement / Math.max(0.1, handScale);
-    const normalizedMinDisplacement = this.minDisplacement / Math.max(0.1, handScale);
-    
+    const absMeanVx = Math.abs(meanVx);
+    const absDisp = Math.abs(this.totalDisplacement);
+    const movingDuration = this.movingStartTime > 0 ? now - this.movingStartTime : 0;
+
+    let failureReasons = [];
+    if (this.state === 'MOVING') {
+      if (absMeanVx < this.minVelocity) {
+        failureReasons.push('velocity_fail');
+      }
+      if (absDisp < this.minDisplacement) {
+        failureReasons.push('displacement_fail');
+      }
+      if (movingDuration < this.minMovingDuration) {
+        failureReasons.push('duration_fail');
+      }
+    }
+
     return {
       state: this.state,
+      moveHandScale: this.moveHandScale,
       meanVx: meanVx,
       instantVx: instantVx,
-      displacement: normalizedDisplacement,
-      minDisplacement: normalizedMinDisplacement,
       minVelocity: this.minVelocity,
-      commitVelocity: this.commitVelocity,
-      frames: this.rawPalmHistory.length
+      displacement: this.totalDisplacement,
+      minDisplacement: this.minDisplacement,
+      movingDuration: movingDuration,
+      minMovingDuration: this.minMovingDuration,
+      frames: this.frameCount,
+      direction: this.direction,
+      failureReasons: failureReasons
     };
   }
 }
+
 
 // ========== GESTURE DETECTOR (ORCHESTRATOR) ==========
 class GestureDetector {
@@ -404,6 +463,11 @@ class GestureDetector {
     const moveResult = this.moveStateMachine.update(landmarks, this.handScale, handedness);
     const moveState = this.moveStateMachine.getState();
     
+    // Reset pinch khi MOVE đang active
+    if (moveState === 'MOVING' || moveState === 'COMMIT') {
+      this.pinchDetector.reset();
+    }
+    
     // Chỉ detect static/pinch khi MOVE ở IDLE hoặc COOLDOWN
     let staticResult = { gesture: GESTURES.NONE, confidence: 0 };
     let pinchResult = { gesture: GESTURES.NONE, confidence: 0 };
@@ -413,28 +477,22 @@ class GestureDetector {
       pinchResult = this.pinchDetector.detect(landmarks, this.handScale);
     }
     
-    // Chọn gesture có confidence cao nhất
-    const candidates = [moveResult, staticResult, pinchResult]
-      .filter(g => g.gesture !== GESTURES.NONE);
-    
-    if (candidates.length === 0) {
-      return { gesture: GESTURES.NONE, confidence: 0 };
+    // MOVE dominates: nếu có MOVE result, return ngay
+    if (moveResult.gesture !== GESTURES.NONE) {
+      return moveResult;
     }
     
-    // Ưu tiên: dynamic > static
-    candidates.sort((a, b) => {
-      const aIsDynamic = [GESTURES.PINCH, GESTURES.MOVE_LEFT, GESTURES.MOVE_RIGHT].includes(a.gesture);
-      const bIsDynamic = [GESTURES.PINCH, GESTURES.MOVE_LEFT, GESTURES.MOVE_RIGHT].includes(b.gesture);
-      if (aIsDynamic !== bIsDynamic) {
-        if (Math.abs(a.confidence - b.confidence) < 0.1) {
-          return aIsDynamic ? -1 : 1;
-        }
-      }
-      return b.confidence - a.confidence;
-    });
+    // PINCH next priority
+    if (pinchResult.gesture !== GESTURES.NONE) {
+      return pinchResult;
+    }
     
-    const best = candidates[0];
-    return best.confidence > 0.5 ? best : { gesture: GESTURES.NONE, confidence: 0 };
+    // STATIC fallback
+    if (staticResult.gesture !== GESTURES.NONE) {
+      return staticResult;
+    }
+    
+    return { gesture: GESTURES.NONE, confidence: 0 };
   }
 
   reset() {
@@ -515,9 +573,6 @@ function init() {
 
   // ========== GESTURE DETECTOR ==========
   const gestureDetector = new GestureDetector();
-  let lastGesture = GESTURES.NONE;
-  let lastGestureTime = 0;
-  const gestureCooldown = 200;
 
   // ========== EMA SMOOTHING (CHỈ CHO RENDER) ==========
   const SMOOTHING_ALPHA = 0.3;
@@ -575,12 +630,8 @@ function init() {
       updateRingPosition(smoothedIndexMCP, ring);
       
       // Handle gesture
-      const now = Date.now();
-      if (result.gesture !== GESTURES.NONE && 
-          (result.gesture !== lastGesture || now - lastGestureTime > gestureCooldown)) {
+      if (result.gesture !== GESTURES.NONE) {
         handleGesture(result.gesture, result.confidence);
-        lastGesture = result.gesture;
-        lastGestureTime = now;
       }
       
       // Debug
@@ -655,7 +706,7 @@ function init() {
     const pinkyExtended = staticDetector.isFingerExtended(landmarks, [17, 18, 19, 20]);
     
     // Debug info từ MoveStateMachine (khớp logic thật)
-    const moveDebug = gestureDetector.moveStateMachine.getDebugInfo(gestureDetector.handScale);
+    const moveDebug = gestureDetector.moveStateMachine.getDebugInfo(handedness);
     
     let info = `<strong>Hand Detected</strong><br>`;
     info += `Hand: ${handedness}<br>`;
@@ -668,13 +719,19 @@ function init() {
     
     if (moveDebug) {
       info += `<br><strong>MOVE State: ${moveDebug.state}</strong><br>`;
+      info += `Direction: ${moveDebug.direction || 'N/A'}<br>`;
+      info += `Move HandScale: ${moveDebug.moveHandScale.toFixed(3)}<br>`;
       info += `Mean Velocity: ${moveDebug.meanVx.toFixed(4)}<br>`;
       info += `Instant Velocity: ${moveDebug.instantVx.toFixed(4)}<br>`;
       info += `Min Velocity: ${moveDebug.minVelocity.toFixed(4)}<br>`;
-      info += `Commit Velocity: ${moveDebug.commitVelocity.toFixed(4)}<br>`;
       info += `Displacement: ${moveDebug.displacement.toFixed(3)}<br>`;
       info += `Min Displacement: ${moveDebug.minDisplacement.toFixed(3)}<br>`;
-      info += `Frames: ${moveDebug.frames}<br>`;
+      info += `Moving Duration: ${Math.round(moveDebug.movingDuration)}ms<br>`;
+      info += `Min Duration: ${moveDebug.minMovingDuration}ms<br>`;
+      info += `Total Frames: ${moveDebug.frames}<br>`;
+      if (moveDebug.failureReasons && moveDebug.failureReasons.length > 0) {
+        info += `Failures: ${moveDebug.failureReasons.join(', ')}<br>`;
+      }
       if (moveDebug.state === 'COOLDOWN') {
         const remaining = gestureDetector.moveStateMachine.cooldownDuration - 
           (Date.now() - gestureDetector.moveStateMachine.cooldownStartTime);
