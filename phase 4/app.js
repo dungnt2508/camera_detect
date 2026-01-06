@@ -1,3 +1,6 @@
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
 window.addEventListener("load", () => {
   init();
 });
@@ -641,14 +644,11 @@ class GestureDetector {
 
     this.handScale = Math.max(0.01, this.computeHandScale(landmarks));
     
-    // TRY_ON: Chỉ detect vertical move cho zoom
+    // TRY_ON: Detect INDEX_UP và THUMB_UP cho auto zoom
     if (appState === 'TRY_ON') {
-      const verticalResult = this.verticalMoveDetector.update(landmarks, this.handScale);
-      if (verticalResult.gesture !== GESTURES.NONE) {
-        return verticalResult;
-      }
-      // Trong TRY_ON, không detect gesture khác
-      return { gesture: GESTURES.NONE, confidence: 0 };
+      // Detect static gestures để biết INDEX_UP và THUMB_UP
+      const staticResult = this.staticDetector.detect(landmarks, this.handScale);
+      return staticResult;
     }
     
     // BROWSE và ACTIVE: Detect horizontal move, FIST hold, và static gestures
@@ -741,17 +741,21 @@ function init() {
   renderer.setSize(window.innerWidth, window.innerHeight);
   document.body.appendChild(renderer.domElement);
 
-  scene.add(new THREE.AmbientLight(0xffffff, 0.8));
-  const light = new THREE.DirectionalLight(0xffffff, 0.8);
-  light.position.set(0, 0, 5);
-  scene.add(light);
+  // Ánh sáng: Ambient + Directional (không shadow động)
+  const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+  scene.add(ambientLight);
+  
+  const directionalLight1 = new THREE.DirectionalLight(0xffffff, 0.8);
+  directionalLight1.position.set(5, 5, 5);
+  scene.add(directionalLight1);
+  
+  const directionalLight2 = new THREE.DirectionalLight(0xffffff, 0.4);
+  directionalLight2.position.set(-5, 3, -5);
+  scene.add(directionalLight2);
 
   const items = [
-    { name: "Nhẫn Vàng", type: "ring", color: 0xffd700, size: 0.15, thickness: 0.05 },
-    { name: "Nhẫn Bạc", type: "ring", color: 0xc0c0c0, size: 0.15, thickness: 0.05 },
-    { name: "Nhẫn Đồng", type: "ring", color: 0xcd7f32, size: 0.15, thickness: 0.05 },
-    { name: "Vòng Vàng", type: "bracelet", color: 0xffd700, size: 0.6, thickness: 0.2 },
-    { name: "Vòng Bạc", type: "bracelet", color: 0xc0c0c0, size: 0.6, thickness: 0.2 }
+    { name: "Nhẫn", type: "ring", glbPath: "assets/1.glb" },
+    { name: "Vòng", type: "bracelet", glbPath: "assets/ball_bearing.glb" }
   ];
 
   let currentItemIndex = 0;
@@ -759,38 +763,101 @@ function init() {
   const MIN_SCALE = 0.5;
   const MAX_SCALE = 2.0;
   const SCALE_STEP = 0.1;
+  
+  // Auto zoom state
+  let autoZoomState = 'STOPPED'; // 'ZOOM_IN', 'ZOOM_OUT', 'STOPPED'
+  const AUTO_ZOOM_SPEED = 0.005; // Tốc độ zoom mỗi frame
 
-  const braceletGeometry = new THREE.TorusGeometry(0.6, 0.2, 16, 100);
-  const braceletMaterial = new THREE.MeshStandardMaterial({ color: 0xffd700 });
-  const bracelet = new THREE.Mesh(braceletGeometry, braceletMaterial);
-  bracelet.rotation.x = Math.PI / 2;
-  bracelet.visible = false;
-  scene.add(bracelet);
-
-  const ringGeometry = new THREE.TorusGeometry(0.15, 0.05, 16, 100);
-  const ringMaterial = new THREE.MeshStandardMaterial({ color: 0xc0c0c0 });
-  const ring = new THREE.Mesh(ringGeometry, ringMaterial);
-  ring.rotation.x = Math.PI / 2;
-  ring.visible = false;
-  scene.add(ring);
+  // GLB models containers
+  let bracelet = null;
+  let ring = null;
+  const loader = new GLTFLoader();
+  
+  // Target scale cho models (chuẩn hóa kích thước)
+  const TARGET_RING_SIZE = 0.15; // Kích thước mục tiêu cho nhẫn
+  const TARGET_BRACELET_SIZE = 0.6; // Kích thước mục tiêu cho vòng
+  
+  function loadModels() {
+  
+  function calculateBoundingBox(object) {
+    const box = new THREE.Box3().setFromObject(object);
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    return { size, center };
+  }
+  
+  function normalizeModelScale(model, targetSize) {
+    const { size, center } = calculateBoundingBox(model);
+    const maxDimension = Math.max(size.x, size.y, size.z);
+    const scale = targetSize / maxDimension;
+    
+    // Áp dụng scale
+    model.scale.set(scale, scale, scale);
+    
+    // Điều chỉnh pivot về gốc (0,0,0)
+    model.position.sub(center.multiplyScalar(scale));
+    
+    return model;
+  }
+  
+  function loadGLBModel(path, onLoad) {
+    loader.load(
+      path,
+      (gltf) => {
+        const model = gltf.scene;
+        // Traverse và đảm bảo PBR materials được giữ nguyên
+        model.traverse((child) => {
+          if (child.isMesh) {
+            child.castShadow = false;
+            child.receiveShadow = false;
+            // Giữ nguyên material từ GLB (PBR)
+          }
+        });
+        onLoad(model);
+      },
+      (progress) => {
+        console.log(`Loading ${path}: ${(progress.loaded / progress.total * 100)}%`);
+      },
+      (error) => {
+        console.error(`Error loading ${path}:`, error);
+      }
+    );
+  }
+  
+    // Load ring model
+    loadGLBModel('assets/1.glb', (model) => {
+      ring = normalizeModelScale(model, TARGET_RING_SIZE);
+      ring.visible = false;
+      scene.add(ring);
+      console.log('Ring model loaded');
+      updateCurrentItem(); // Update sau khi load
+    });
+    
+    // Load bracelet model
+    loadGLBModel('assets/ball_bearing.glb', (model) => {
+      bracelet = normalizeModelScale(model, TARGET_BRACELET_SIZE);
+      bracelet.visible = false;
+      scene.add(bracelet);
+      console.log('Bracelet model loaded');
+      updateCurrentItem(); // Update sau khi load
+    });
+  }
+  
+  // Khởi tạo GLB loader
+  loadModels();
 
   function updateCurrentItem() {
     const item = items[currentItemIndex];
+    if (!ring || !bracelet) {
+      // Models chưa load xong
+      return;
+    }
+    
     if (item.type === "bracelet") {
-      if (bracelet.geometry) {
-        bracelet.geometry.dispose();
-      }
-      bracelet.geometry = new THREE.TorusGeometry(item.size, item.thickness, 16, 100);
-      bracelet.material.color.setHex(item.color);
       bracelet.visible = true;
       ring.visible = false;
       bracelet.scale.set(itemScale, itemScale, itemScale);
     } else {
-      if (ring.geometry) {
-        ring.geometry.dispose();
-      }
-      ring.geometry = new THREE.TorusGeometry(item.size, item.thickness, 16, 100);
-      ring.material.color.setHex(item.color);
       ring.visible = true;
       bracelet.visible = false;
       ring.scale.set(itemScale, itemScale, itemScale);
@@ -799,20 +866,55 @@ function init() {
   
   function resetZoom() {
     itemScale = 1.0;
-    bracelet.scale.set(1, 1, 1);
-    ring.scale.set(1, 1, 1);
+    autoZoomState = 'STOPPED';
+    if (bracelet) bracelet.scale.set(1, 1, 1);
+    if (ring) ring.scale.set(1, 1, 1);
   }
   
   function zoomIn() {
     itemScale = Math.min(MAX_SCALE, itemScale + SCALE_STEP);
-    bracelet.scale.set(itemScale, itemScale, itemScale);
-    ring.scale.set(itemScale, itemScale, itemScale);
+    if (bracelet) bracelet.scale.set(itemScale, itemScale, itemScale);
+    if (ring) ring.scale.set(itemScale, itemScale, itemScale);
   }
   
   function zoomOut() {
     itemScale = Math.max(MIN_SCALE, itemScale - SCALE_STEP);
-    bracelet.scale.set(itemScale, itemScale, itemScale);
-    ring.scale.set(itemScale, itemScale, itemScale);
+    if (bracelet) bracelet.scale.set(itemScale, itemScale, itemScale);
+    if (ring) ring.scale.set(itemScale, itemScale, itemScale);
+  }
+  
+  function updateAutoZoom() {
+    if (autoZoomState === 'ZOOM_IN') {
+      itemScale = Math.min(MAX_SCALE, itemScale + AUTO_ZOOM_SPEED);
+      if (bracelet) bracelet.scale.set(itemScale, itemScale, itemScale);
+      if (ring) ring.scale.set(itemScale, itemScale, itemScale);
+    } else if (autoZoomState === 'ZOOM_OUT') {
+      itemScale = Math.max(MIN_SCALE, itemScale - AUTO_ZOOM_SPEED);
+      if (bracelet) bracelet.scale.set(itemScale, itemScale, itemScale);
+      if (ring) ring.scale.set(itemScale, itemScale, itemScale);
+    }
+  }
+  
+  function getIndexFingerDirection(landmarks) {
+    if (!landmarks || landmarks.length < 21) {
+      return null;
+    }
+    
+    const indexTip = landmarks[8]; // Index finger tip
+    const indexMCP = landmarks[5]; // Index finger MCP
+    
+    // Trong camera space, y tăng từ trên xuống
+    // Nếu index tip y < index MCP y → ngón trỏ hướng lên
+    // Nếu index tip y > index MCP y → ngón trỏ hướng xuống
+    const dy = indexTip.y - indexMCP.y;
+    
+    if (dy < -0.05) {
+      return 'UP'; // Ngón trỏ hướng lên
+    } else if (dy > 0.05) {
+      return 'DOWN'; // Ngón trỏ hướng xuống
+    }
+    
+    return null; // Không xác định được
   }
 
   updateCurrentItem();
@@ -879,11 +981,11 @@ function init() {
       
       // Chỉ hiển thị item khi ở BROWSE hoặc TRY_ON
       if (currentAppState === 'BROWSE' || currentAppState === 'TRY_ON') {
-        updateBraceletPosition(smoothedWrist, bracelet);
-        updateRingPosition(smoothedIndexMCP, ring);
+        if (bracelet) updateBraceletPosition(smoothedWrist, bracelet);
+        if (ring) updateRingPosition(smoothedIndexMCP, ring);
       } else {
-        bracelet.visible = false;
-        ring.visible = false;
+        if (bracelet) bracelet.visible = false;
+        if (ring) ring.visible = false;
       }
       
       // Track FIST state change để xử lý release trong TRY_ON
@@ -894,6 +996,33 @@ function init() {
         appStateMachine.transitionTo('BROWSE');
       }
       lastFistState = currentFistState;
+      
+      // Xử lý auto zoom trong TRY_ON
+      if (currentAppState === 'TRY_ON') {
+        const indexDirection = getIndexFingerDirection(smoothedLandmarks);
+        const thumbExtended = gestureDetector.staticDetector.isThumbExtended(smoothedLandmarks, gestureDetector.handScale);
+        const indexExtended = gestureDetector.staticDetector.isFingerExtended(smoothedLandmarks, [5, 6, 7, 8]);
+        
+        // Ngón cái → dừng zoom
+        if (thumbExtended) {
+          autoZoomState = 'STOPPED';
+        }
+        // Ngón trỏ hướng lên → auto zoom in
+        else if (indexExtended && indexDirection === 'DOWN') {
+          autoZoomState = 'ZOOM_IN';
+        }
+        // Ngón trỏ hướng xuống → auto zoom out
+        else if (indexExtended && indexDirection === 'UP') {
+          autoZoomState = 'ZOOM_OUT';
+        }
+        // Không có ngón trỏ hoặc ngón cái → dừng
+        else {
+          autoZoomState = 'STOPPED';
+        }
+      } else {
+        // Không ở TRY_ON → dừng zoom
+        autoZoomState = 'STOPPED';
+      }
       
       // Xử lý gesture dựa trên state - logic không chồng chéo
       if (result.gesture !== GESTURES.NONE) {
@@ -911,8 +1040,8 @@ function init() {
       }
       gestureDetector.reset();
       smoothedLandmarks = null;
-      bracelet.visible = false;
-      ring.visible = false;
+      if (bracelet) bracelet.visible = false;
+      if (ring) ring.visible = false;
       lastFistState = 'OPEN';
     }
   });
@@ -952,14 +1081,8 @@ function init() {
         break;
 
       case 'TRY_ON':
-        // TRY_ON: Zoom-in/zoom-out với swipe lên/xuống
-        if (gesture === GESTURES.MOVE_UP) {
-          zoomIn();
-          console.log(`Zoom in: ${itemScale.toFixed(2)}`);
-        } else if (gesture === GESTURES.MOVE_DOWN) {
-          zoomOut();
-          console.log(`Zoom out: ${itemScale.toFixed(2)}`);
-        }
+        // TRY_ON: Auto zoom với ngón trỏ
+        // Xử lý trong onResults với landmarks để xác định hướng
         // FIST release được xử lý ở onResults
         break;
 
@@ -1009,6 +1132,11 @@ function init() {
       info += `Item: ${currentItem.name} (${currentItemIndex + 1}/${items.length})<br>`;
       if (appState === 'TRY_ON') {
         info += `Zoom: ${(itemScale * 100).toFixed(0)}%<br>`;
+        info += `Auto Zoom: ${autoZoomState}<br>`;
+        const indexDir = getIndexFingerDirection(landmarks);
+        if (indexDir) {
+          info += `Index Direction: ${indexDir}<br>`;
+        }
       }
     }
     
@@ -1064,8 +1192,10 @@ function init() {
 
   function animate() {
     requestAnimationFrame(animate);
-    bracelet.rotation.z += 0.005;
-    ring.rotation.z += 0.005;
+    if (bracelet) bracelet.rotation.z += 0.005;
+    if (ring) ring.rotation.z += 0.005;
+    // Auto zoom update
+    updateAutoZoom();
     renderer.render(scene, camera);
   }
 
