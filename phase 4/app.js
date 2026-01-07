@@ -164,10 +164,20 @@ function init() {
       } else if (currentAppState === 'TRY_ON' && currentModel) {
         const item = items[currentItemIndex];
         currentModel.userData.zoomScale = itemScale;
+
         if (item.type === "bracelet") {
           ringAttachmentController.updateBracelet(rawLandmarks, currentModel);
         } else {
-          ringAttachmentController.update(rawLandmarks, currentModel);
+          // Xác định ngón tay đang giơ (INDEX, MIDDLE, RING, PINKY)
+          let fingerType = currentModel.userData.activeFinger || 'INDEX';
+          if (gestureResult.gesture === GESTURES.INDEX_UP) fingerType = 'INDEX';
+          else if (gestureResult.gesture === GESTURES.MIDDLE_UP) fingerType = 'MIDDLE';
+          else if (gestureResult.gesture === GESTURES.RING_UP) fingerType = 'RING';
+          else if (gestureResult.gesture === GESTURES.PINKY_UP) fingerType = 'PINKY';
+          else if (gestureResult.gesture === GESTURES.THUMB_UP) fingerType = 'THUMB';
+
+          currentModel.userData.activeFinger = fingerType;
+          ringAttachmentController.update(rawLandmarks, currentModel, fingerType);
         }
         applyCombinedScale(currentModel);
       }

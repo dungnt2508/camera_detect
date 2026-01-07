@@ -48,26 +48,24 @@ export class StaticGestureDetector {
     const middleExtended = this.isFingerExtended(landmarks, [9, 10, 11, 12]);
     const ringExtended = this.isFingerExtended(landmarks, [13, 14, 15, 16]);
     const pinkyExtended = this.isFingerExtended(landmarks, [17, 18, 19, 20]);
-    
+
     const extendedFingers = [
       indexExtended,
       middleExtended,
       ringExtended,
       pinkyExtended
     ].filter(Boolean).length;
-    
+
     let gesture = GESTURES.NONE;
-    if (extendedFingers === 0 && !thumbExtended) {
-      gesture = GESTURES.FIST;
-    } else if (extendedFingers === 0 && thumbExtended) {
-      gesture = GESTURES.THUMB_UP;
-    } else if (extendedFingers === 1) {
-      if (indexExtended) gesture = GESTURES.INDEX_UP;
-      else if (middleExtended) gesture = GESTURES.MIDDLE_UP;
-      else if (ringExtended) gesture = GESTURES.RING_UP;
-      else if (pinkyExtended) gesture = GESTURES.PINKY_UP;
-    }
-    
+
+    // Priority-based finger selection
+    if (ringExtended) gesture = GESTURES.RING_UP;
+    else if (middleExtended) gesture = GESTURES.MIDDLE_UP;
+    else if (indexExtended) gesture = GESTURES.INDEX_UP;
+    else if (pinkyExtended) gesture = GESTURES.PINKY_UP;
+    else if (thumbExtended) gesture = GESTURES.THUMB_UP;
+    else gesture = GESTURES.FIST; // No fingers extended
+
     const last = this.gestureHistory.at(-1);
     if (last && last !== gesture) {
       this.gestureHistory = [];
@@ -76,13 +74,13 @@ export class StaticGestureDetector {
     if (this.gestureHistory.length > this.staticMinFrames) {
       this.gestureHistory.shift();
     }
-    
+
     if (this.gestureHistory.length >= this.staticMinFrames) {
       const allSame = this.gestureHistory.every(g => g === gesture);
       const confidence = allSame ? 0.85 : 0.5;
       return { gesture, confidence };
     }
-    
+
     return { gesture: GESTURES.NONE, confidence: 0 };
   }
 

@@ -1,17 +1,17 @@
 import * as THREE from 'three';
 
-const SPRING_STRENGTH = 40.0;
-const DAMPING_FACTOR = 0.5;
-const ROTATION_SPRING = 20.0;
-const ROTATION_DAMPING = 0.7;
-const MAX_TWIST_VELOCITY = 30.0;
+const SPRING_STRENGTH = 80.0;
+const DAMPING_FACTOR = 0.4;
+const ROTATION_SPRING = 40.0;
+const ROTATION_DAMPING = 0.6;
+const MAX_TWIST_VELOCITY = 50.0;
 
 const LOCAL_OFFSET_Y = 0.25;
 const LOCAL_OFFSET_Z = 0.05;
 const RING_TILT_MAX = 0.35;
 const RING_TILT_FACTOR = 0.5;
 
-const EMA_ALPHA_NORMAL = 0.2;
+const EMA_ALPHA_NORMAL = 0.5; // Tăng lên để bám sát hơn, bù lại bằng physics damping
 const EMA_ALPHA_SCALE = 0.3;
 const EMA_ALPHA_WIDTH = 0.1;
 const EMA_ALPHA_DEPTH = 0.1;
@@ -86,14 +86,14 @@ export class RingAttachmentController {
     }
   }
 
-  update(landmarks, model) {
+  update(landmarks, model, fingerType = 'INDEX') {
     if (!landmarks || !model) return;
 
     const now = performance.now();
     const dt = Math.min((now - this.state.lastTime) / 1000, 0.033);
     this.state.lastTime = now;
 
-    const finger = this.getFingerLandmarks(landmarks);
+    const finger = this.getFingerLandmarks(landmarks, fingerType);
     if (!finger) return;
 
     const palmNormalRaw = this.calculatePalmNormal(landmarks);
@@ -180,15 +180,39 @@ export class RingAttachmentController {
     model.position.copy(this.state.position);
   }
 
-  getFingerLandmarks(landmarks) {
+  getFingerLandmarks(landmarks, fingerType = 'INDEX') {
     if (!landmarks || landmarks.length < 21) return null;
+
+    let baseIdx = 5; // Default INDEX
+    let refIdx = 9;  // Neighbor for "right" vector
+
+    if (fingerType === 'MIDDLE') {
+      baseIdx = 9;
+      refIdx = 13;
+    } else if (fingerType === 'RING') {
+      baseIdx = 13;
+      refIdx = 17;
+    } else if (fingerType === 'PINKY') {
+      baseIdx = 17;
+      refIdx = 13;
+    } else if (fingerType === 'THUMB') {
+      return {
+        mcp: landmarks[2],
+        pip: landmarks[3],
+        dip: landmarks[4],
+        tip: landmarks[4],
+        refMCP: landmarks[5],
+        fingerType
+      };
+    }
+
     return {
-      mcp: landmarks[5],
-      pip: landmarks[6],
-      dip: landmarks[7],
-      tip: landmarks[8],
-      middleMCP: landmarks[9],
-      middlePIP: landmarks[10]
+      mcp: landmarks[baseIdx],
+      pip: landmarks[baseIdx + 1],
+      dip: landmarks[baseIdx + 2],
+      tip: landmarks[baseIdx + 3],
+      refMCP: landmarks[refIdx],
+      fingerType
     };
   }
 
@@ -210,7 +234,14 @@ export class RingAttachmentController {
     if (forwardLength < 0.001) return null;
     forward.normalize();
 
-    const right = new THREE.Vector3(finger.middleMCP.x - finger.mcp.x, finger.middleMCP.y - finger.mcp.y, finger.middleMCP.z - finger.mcp.z);
+    // Calculate "right" vector relative to the neighbor finger
+    const right = new THREE.Vector3(finger.refMCP.x - finger.mcp.x, finger.refMCP.y - finger.mcp.y, finger.refMCP.z - finger.mcp.z);
+
+    // If it's the pinky, the neighbor (ring) is to the left, so we flip the "right" vector
+    if (finger.fingerType === 'PINKY') {
+      right.multiplyScalar(-1);
+    }
+
     if (right.lengthSq() < 0.0001) {
       right.copy(new THREE.Vector3().crossVectors(palmNormal, forward)).normalize();
     } else {
@@ -267,7 +298,7 @@ export class RingAttachmentController {
   }
 
   calculateScale(finger, depthZ) {
-    const width = Math.hypot(finger.middleMCP.x - finger.mcp.x, finger.middleMCP.y - finger.mcp.y, finger.middleMCP.z - finger.mcp.z);
+    const width = Math.hypot(finger.refMCP.x - finger.mcp.x, finger.refMCP.y - finger.mcp.y, finger.refMCP.z - finger.mcp.z);
     this.state.emaFingerWidth = EMA_ALPHA_WIDTH * width + (1 - EMA_ALPHA_WIDTH) * this.state.emaFingerWidth;
     this.state.emaDepthZ = EMA_ALPHA_DEPTH * depthZ + (1 - EMA_ALPHA_DEPTH) * this.state.emaDepthZ;
 
@@ -281,7 +312,7 @@ export class RingAttachmentController {
     return this.state.scale;
   }
 
-  smoothForward(current, target, maxStepRad = 0.35) {
+  smoothForward(current, target, maxStepRad = 0.8) {
     const angle = current.angleTo(target);
     if (angle < 0.001) return target.clone();
     const clampedAngle = Math.min(angle, maxStepRad);
