@@ -54,11 +54,11 @@ export class GestureStateController {
         if (gesture === GESTURES.MOVE_LEFT || gesture === GESTURES.MOVE_RIGHT) {
           nextIndex = this._applySwipe(currentItemIndex, items.length, gesture);
           this.lifecycle.showCarousel(nextIndex);
-        } else if (gesture === GESTURES.FIST_HOLD) {
+        } else if (gesture === GESTURES.DOUBLE_PINCH) {
           const model = this.lifecycle.activateTryOn(currentItemIndex);
           if (model) {
             this.helpers.resetZoom(model);
-            this.ringAttachment.reset(); // reset() không cần tham số model nữa
+            this.ringAttachment.reset();
             if (items[currentItemIndex].type === 'ring') {
               this.ringAttachment.initialize(landmarks, model);
             }
@@ -70,25 +70,8 @@ export class GestureStateController {
         break;
 
       case 'TRY_ON': {
-        // ALLOWED gestures in TRY_ON: FIST, FIST_HOLD, INDEX_UP (zoom), THUMB_UP (zoom), NONE
-        // Only exit if specifically OPEN/PALM or after prolonged noise
-        const isSafeGesture = (
-          gesture === GESTURES.FIST ||
-          gesture === GESTURES.FIST_HOLD ||
-          gesture === GESTURES.INDEX_UP ||
-          gesture === GESTURES.THUMB_UP ||
-          gesture === GESTURES.NONE
-        );
-
-        if (!isSafeGesture) {
-          const now = Date.now();
-          if (!this.tryOnExitTimer) this.tryOnExitTimer = now;
-
-          if (now - this.tryOnExitTimer < 800) { // Tăng lên 800ms
-            // Vẫn giữ TRY_ON trong thời gian chờ (grace period)
-            break;
-          }
-
+        // Thoát TRY_ON theo yêu cầu: Double Pinch
+        if (gesture === GESTURES.DOUBLE_PINCH) {
           this.tryOnExitTimer = null;
           this.lifecycle.clearTryOn();
           this.helpers.resetZoom(null);
@@ -100,8 +83,9 @@ export class GestureStateController {
           break;
         }
 
-        // Reset timer nếu đang ở gesture an toàn
-        this.tryOnExitTimer = null;
+        // ALLOWED gestures in TRY_ON: FIST, INDEX_UP, MIDDLE_UP, RING_UP, PINKY_UP, THUMB_UP, NONE, DOUBLE_PINCH
+        // Không còn tự động thoát khi gặp gesture lạ (như Palm/Open). 
+        // Chỉ thoát khi người dùng chủ động Double Pinch hoặc mất tay hoàn toàn.
 
         // Auto zoom logic
         const indexDir = this.helpers.getIndexDirection(landmarks);

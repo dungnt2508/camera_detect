@@ -144,19 +144,34 @@ export class RingAttachmentController {
   updateBracelet(landmarks, model) {
     if (!landmarks || !model) return;
     const wrist = landmarks[0];
+    const middleMCP = landmarks[9];
     const now = performance.now();
     const dt = Math.min((now - this.state.lastTime) / 1000, 0.033);
     this.state.lastTime = now;
 
     const targetWorld = this.normalizedToWorld(wrist);
 
-    // Position physics (Ultra-Sticky for Bracelet)
+    // Position physics (Ultra-Sticky)
     const posError = targetWorld.clone().sub(this.state.position);
     this.state.velocity.add(posError.multiplyScalar(SPRING_STRENGTH * dt)).multiplyScalar(DAMPING_FACTOR);
     this.state.position.add(this.state.velocity.clone().multiplyScalar(dt));
-
-    // Force snap if very close to avoid micro-lag
     if (posError.lengthSq() < 0.0001) this.state.position.copy(targetWorld);
+
+    // Orientation physics (Bracelet)
+    const armDir = new THREE.Vector3(middleMCP.x - wrist.x, middleMCP.y - wrist.y, middleMCP.z - wrist.z).normalize();
+    const palmNormalRaw = this.calculatePalmNormal(landmarks);
+    if (palmNormalRaw) {
+      this.state.emaPalmNormal.lerp(palmNormalRaw, EMA_ALPHA_NORMAL).normalize();
+    }
+
+    // Create orientation matrix: Z = arm direction, Y = palm normal
+    const zAxis = armDir.clone();
+    const yAxis = this.state.emaPalmNormal.clone();
+    const xAxis = new THREE.Vector3().crossVectors(yAxis, zAxis).normalize();
+    yAxis.crossVectors(zAxis, xAxis).normalize();
+
+    const targetQuat = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(xAxis, yAxis, zAxis));
+    model.quaternion.slerp(targetQuat, 0.2); // Smooth orientation slightly
 
     const baseScale = model.userData.baseScale || 1.0;
     const zoomScale = model.userData.zoomScale || 1.0;
@@ -231,15 +246,24 @@ export class RingAttachmentController {
   }
 
   buildQuaternionFromForwardTwist(forward, twist, palmNormal) {
-    const twistQuat = new THREE.Quaternion().setFromAxisAngle(forward, twist);
+    // Basis construction for more stable rotation
+    const zAxis = forward.clone().normalize();
+    const refUp = palmNormal ? palmNormal.clone() : new THREE.Vector3(0, 1, 0);
+    const xAxis = new THREE.Vector3().crossVectors(refUp, zAxis).normalize();
+    const yAxis = new THREE.Vector3().crossVectors(zAxis, xAxis).normalize();
+
+    const baseQuat = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(xAxis, yAxis, zAxis));
+    const twistQuat = new THREE.Quaternion().setFromAxisAngle(zAxis, twist);
+
+    // Combine and apply a subtle tilt towards the finger normal for "wearing" feel
     let tiltAngle = 0;
     if (palmNormal) {
       const cosAng = Math.max(-1, Math.min(1, palmNormal.dot(forward)));
-      tiltAngle = Math.min(RING_TILT_MAX, Math.acos(cosAng) * RING_TILT_FACTOR);
+      tiltAngle = (Math.acos(cosAng) - Math.PI / 2) * RING_TILT_FACTOR;
     }
-    const refRight = new THREE.Vector3(1, 0, 0).crossVectors(new THREE.Vector3(1, 0, 0), forward).normalize().applyQuaternion(twistQuat);
-    const tiltQuat = new THREE.Quaternion().setFromAxisAngle(refRight, tiltAngle);
-    return new THREE.Quaternion().multiplyQuaternions(twistQuat, tiltQuat);
+    const tiltQuat = new THREE.Quaternion().setFromAxisAngle(xAxis, tiltAngle);
+
+    return baseQuat.multiply(twistQuat).multiply(tiltQuat);
   }
 
   calculateScale(finger, depthZ) {
