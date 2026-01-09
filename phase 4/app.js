@@ -9,6 +9,7 @@ import { getIndexFingerDirection } from './utils/positionUtils.js';
 import { resetZoom, updateAutoZoom, applyCombinedScale } from './utils/zoomUtils.js';
 import { updateDebug } from './utils/debugUtils.js';
 import { RingAttachmentController } from './controllers/RingAttachmentController.js';
+import { NecklaceAttachmentController } from './controllers/NecklaceAttachmentController.js';
 import { ModelLifecycleManager } from './controllers/ModelLifecycleManager.js';
 import { GestureStateController } from './controllers/GestureStateController.js';
 
@@ -56,7 +57,12 @@ function init() {
     { name: "Nhẫn Kim cương 18k", type: "ring", glbPath: "assets/ring/ring-nhankc-18k.glb" },
     { name: "Nhẫn Cầu hôn", type: "ring", glbPath: "assets/ring/ring-nhancauhon.glb" },
     // { name: "Nhẫn Main", type: "ring", glbPath: "assets/ring/Main_model.glb" },
-    { name: "Vòng 1", type: "bracelet", glbPath: "assets/bracelet/1.glb" }
+    { name: "Vòng tay 1", type: "bracelet", glbPath: "assets/bracelet/vongtay1.glb" },
+    { name: "Vòng tay 2", type: "bracelet", glbPath: "assets/bracelet/vongtay2.glb" },
+    { name: "Vòng tay 3", type: "bracelet", glbPath: "assets/bracelet/vongtay3.glb" },
+    { name: "Dây chuyền 1", type: "necklace", glbPath: "assets/daychuyen/daychuyen1.glb" },
+    { name: "Dây chuyền 2", type: "necklace", glbPath: "assets/daychuyen/daychuyen2.glb" },
+    { name: "Dây chuyền 3", type: "necklace", glbPath: "assets/daychuyen/daychuyen3.glb" },
   ];
 
   let currentItemIndex = 0;
@@ -91,6 +97,7 @@ function init() {
     far: camera.far
   };
   const ringAttachmentController = new RingAttachmentController(cameraProjection);
+  const necklaceAttachmentController = new NecklaceAttachmentController(cameraProjection);
   const gestureStateController = new GestureStateController(
     appStateMachine,
     lifecycleManager,
@@ -130,6 +137,32 @@ function init() {
     minTrackingConfidence: 0.5
   });
 
+  // Initialize Pose
+  const PoseClass = window.Pose || (window.mpPose ? window.mpPose.Pose : null);
+  if (!PoseClass) {
+    console.error('MediaPipe Pose chưa được load!');
+    debugDiv.textContent = 'Lỗi: MediaPipe Pose chưa được load';
+    return;
+  }
+
+  const pose = new PoseClass({
+    locateFile: (file) => {
+      return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+    }
+  });
+
+  pose.setOptions({
+    modelComplexity: 1,
+    smoothLandmarks: true,
+    minDetectionConfidence: 0.5,
+    minTrackingConfidence: 0.5
+  });
+
+  let latestPoseResults = null;
+  pose.onResults((results) => {
+    latestPoseResults = results;
+  });
+
   hands.onResults((results) => {
     const hasHand = results.multiHandLandmarks && results.multiHandLandmarks.length > 0;
     currentAppState = appStateMachine.update(hasHand);
@@ -167,6 +200,10 @@ function init() {
 
         if (item.type === "bracelet") {
           ringAttachmentController.updateBracelet(rawLandmarks, currentModel);
+        } else if (item.type === "necklace") {
+          if (latestPoseResults && latestPoseResults.poseLandmarks) {
+            necklaceAttachmentController.update(latestPoseResults.poseLandmarks, currentModel);
+          }
         } else {
           // Xác định ngón tay đang giơ (INDEX, MIDDLE, RING, PINKY)
           let fingerType = currentModel.userData.activeFinger || 'INDEX';
@@ -230,6 +267,7 @@ function init() {
   const camera_utils = new Camera(video, {
     onFrame: async () => {
       await hands.send({ image: video });
+      await pose.send({ image: video });
     },
     width: 1280,
     height: 720

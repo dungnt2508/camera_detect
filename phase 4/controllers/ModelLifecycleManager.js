@@ -1,4 +1,4 @@
-import { loadGLBModel, normalizeModelScale, TARGET_UNIFORM_SIZE } from '../utils/modelUtils.js';
+import { loadGLBModel, normalizeModelScale, TARGET_UNIFORM_SIZE, preprocessNecklaceModel } from '../utils/modelUtils.js';
 import { updateCarousel } from '../utils/carouselUtils.js';
 
 export class ModelLifecycleManager {
@@ -14,6 +14,11 @@ export class ModelLifecycleManager {
   loadAll(onAllLoaded) {
     this.items.forEach((item, index) => {
       loadGLBModel(this.loader, item.glbPath, (model) => {
+        // Áp dụng Asset Engineering cho dây chuyền trước khi normalize
+        if (item.type === 'necklace') {
+          preprocessNecklaceModel(model);
+        }
+
         const normalized = normalizeModelScale(model, TARGET_UNIFORM_SIZE);
         normalized.visible = false;
         normalized.userData.baseScale = normalized.scale.x;
